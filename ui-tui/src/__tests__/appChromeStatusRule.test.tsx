@@ -95,13 +95,14 @@ const baseProps = {
   cwdLabel: '~/repo',
   liveSessionCount: 0,
   model: 'opus-4.8',
+  runtime: null,
   sessionStartedAt: null,
   showCost: false,
   status: 'ready',
   statusColor: DEFAULT_THEME.color.ok,
   t: DEFAULT_THEME,
   turnStartedAt: null,
-  usage: { context_max: 200_000, context_percent: 25, context_used: 50_000, total: 50_000 },
+  usage: { calls: 0, context_max: 200_000, context_percent: 25, context_used: 50_000, input: 0, output: 0, total: 50_000 },
   voiceLabel: ''
 }
 
@@ -122,7 +123,7 @@ describe('StatusRule session count click target', () => {
       statusColor: DEFAULT_THEME.color.ok,
       t: DEFAULT_THEME,
       turnStartedAt: null,
-      usage: { total: 0 },
+      usage: { calls: 0, input: 0, output: 0, total: 0 },
       voiceLabel: ''
     })
 
@@ -142,26 +143,40 @@ describe('StatusRule session count click target', () => {
       liveSessionCount: 3,
       model: 'opus-4.8',
       onSessionCountClick: vi.fn(),
+      runtime: null,
       sessionStartedAt: Date.now() - 60_000,
       showCost: true,
       status: 'ready',
       statusColor: DEFAULT_THEME.color.ok,
       t: DEFAULT_THEME,
       turnStartedAt: null,
-      usage: { context_max: 200_000, context_percent: 25, context_used: 50_000, cost_usd: 0.5, total: 50_000 },
+      usage: { calls: 0, context_max: 200_000, context_percent: 25, context_used: 50_000, cost_usd: 0.5, input: 0, output: 0, total: 50_000 },
       voiceLabel: 'voice off'
     })
 
     const rendered = textContent(element)
 
-    // Must-keep essentials survive intact …
     expect(rendered).toContain('ready')
     expect(rendered).toContain('opus 4.8')
     // … while the low-value tail (session count, cost) is dropped, not truncated.
     expect(rendered).not.toContain('3 sessions')
     expect(rendered).not.toContain('$0.5000')
   })
+
+  it('renders runtime mode + provider badge alongside the effective model', () => {
+    const element = StatusRule({
+      ...baseProps,
+      model: 'gpt-5.4-mini',
+      runtime: { mode: 'fallback', provider: 'openrouter' }
+    })
+
+    const rendered = textContent(element)
+
+    expect(rendered).toContain('FALLBACK openrouter')
+    expect(rendered).toContain('gpt 5.4 mini')
+  })
 })
+
 
 describe('StatusRule credits notice render priority', () => {
   it('replaces the idle status with the notice text and keeps model + context', () => {

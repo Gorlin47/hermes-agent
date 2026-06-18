@@ -21,6 +21,7 @@ const buildUiState = (): UiState => ({
   notice: null,
   pasteCollapseLines: 5,
   pasteCollapseChars: 2000,
+  runtime: null,
   sections: {},
   showCost: false,
   showReasoning: false,

@@ -82,6 +82,7 @@ def main():
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--session-key", required=True)
     p.add_argument("--model", default="")
+    p.add_argument("--provider", default="")
     args = p.parse_args()
 
     os.environ["HERMES_SESSION_KEY"] = args.session_key
@@ -97,7 +98,13 @@ def main():
     _start_parent_death_watchdog(orig_ppid, parent_create_time)
 
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        cli = HermesCLI(model=args.model or None, compact=True, resume=args.session_key, verbose=False)
+        cli = HermesCLI(
+            model=args.model or None,
+            provider=args.provider or None,
+            compact=True,
+            resume=args.session_key,
+            verbose=False,
+        )
 
     for raw in sys.stdin:
         line = raw.strip()

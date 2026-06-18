@@ -211,7 +211,7 @@ _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
 class _SlashWorker:
     """Persistent HermesCLI subprocess for slash commands."""
 
-    def __init__(self, session_key: str, model: str):
+    def __init__(self, session_key: str, model: str, provider: str | None = None):
         self._lock = threading.Lock()
         self._seq = 0
         self.stderr_tail: list[str] = []
@@ -226,7 +226,14 @@ class _SlashWorker:
         ]
         if model:
             argv += ["--model", model]
+        if provider:
+            argv += ["--provider", provider]
+        if provider == "openrouter":
+            os.environ.setdefault("HERMES_MODEL_PROVIDER", "openrouter")
 
+        env = os.environ.copy()
+        if provider == "openrouter":
+            env.setdefault("HERMES_MODEL_PROVIDER", "openrouter")
         self.proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
@@ -235,7 +242,7 @@ class _SlashWorker:
             text=True,
             bufsize=1,
             cwd=os.getcwd(),
-            env=os.environ.copy(),
+            env=env,
         )
         threading.Thread(target=self._drain_stdout, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
@@ -290,6 +297,22 @@ class _SlashWorker:
                 self.proc.kill()
             except Exception:
                 pass
+
+
+def _spawn_slash_worker(session_key: str, model: str, provider: str | None = None):
+    """Create a slash worker with compatibility for legacy test doubles.
+
+    Some tests monkeypatch `_SlashWorker` with a `(key, model)` fake. Production
+    code now passes `provider` explicitly; this helper keeps that change runtime
+    correct without breaking those narrow doubles.
+    """
+    try:
+        params = inspect.signature(_SlashWorker).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "provider" in params:
+        return _SlashWorker(session_key, model, provider=provider)
+    return _SlashWorker(session_key, model)
 
 
 def _load_busy_input_mode() -> str:
@@ -710,7 +733,11 @@ def _start_agent_build(sid: str, session: dict) -> None:
             current["agent"] = agent
 
             try:
-                worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
+                worker = _spawn_slash_worker(
+                    key,
+                    getattr(agent, "model", _resolve_model()),
+                    provider=getattr(agent, "provider", None),
+                )
                 current["slash_worker"] = worker
             except Exception:
                 pass
@@ -1144,7 +1171,22 @@ def _resolve_model() -> str:
 
 
 def _resolve_startup_runtime() -> tuple[str, str | None]:
+    """Resolve the startup model/provider for the live TUI worker.
+
+    IMPORTANT: the visible dashboard model must remain the *current primary*
+    model. Failover is handled at execution time, not by mutating the primary
+    model here. We still need static, no-network normalization when the user
+    explicitly requested a model alias (for example ``sonnet``), otherwise the
+    TUI startup path can silently fall back to the profile's default provider
+    instead of the provider that actually serves the requested model.
+    """
     model = _resolve_model()
+    cfg = _load_cfg()
+    model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
+    cfg_provider = ""
+    if isinstance(model_cfg, dict):
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+
     explicit_provider = os.environ.get("HERMES_TUI_PROVIDER", "").strip()
     if explicit_provider:
         return model, explicit_provider
@@ -1154,27 +1196,23 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
         or os.environ.get("HERMES_INFERENCE_MODEL", "")
     ).strip()
     if not explicit_model:
-        return model, None
+        return model, (cfg_provider or None)
 
     try:
         from hermes_cli.models import detect_static_provider_for_model
 
-        cfg = _load_cfg().get("model") or {}
         current_provider = (
-            (
-                str(cfg.get("provider") or "").strip().lower()
-                if isinstance(cfg, dict)
-                else ""
-            )
+            cfg_provider
             or os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip().lower()
             or "auto"
         )
         detected = detect_static_provider_for_model(explicit_model, current_provider)
         if detected:
-            provider, detected_model = detected
-            return detected_model, provider
+            detected_provider, detected_model = detected
+            return detected_model, detected_provider
     except Exception:
         pass
+
     return model, None
 
 
@@ -1433,9 +1471,31 @@ def _restart_slash_worker(session: dict):
         except Exception:
             pass
     try:
-        session["slash_worker"] = _SlashWorker(
+        agent = session.get("agent")
+        model = getattr(agent, "model", _resolve_model())
+        provider = getattr(agent, "provider", None)
+        fallback_provider = None
+        if provider == "openai-codex":
+            # If Codex quota is exhausted, the slash worker must be rebuilt
+            # against the agent's live fallback runtime, not the stale Codex
+            # primary. Otherwise the dashboard keeps retrying the exhausted
+            # route even when the session already has a valid fallback chain.
+            runtime = getattr(agent, "_resolve_turn_agent_config", None)
+            if callable(runtime):
+                try:
+                    turn_cfg = runtime("")
+                    runtime_provider = (turn_cfg.get("runtime") or {}).get("provider")
+                    runtime_model = turn_cfg.get("model")
+                    if runtime_provider and runtime_provider != "openai-codex":
+                        fallback_provider = runtime_provider
+                    if runtime_model:
+                        model = runtime_model
+                except Exception:
+                    pass
+        session["slash_worker"] = _spawn_slash_worker(
             session["session_key"],
-            getattr(session.get("agent"), "model", _resolve_model()),
+            model,
+            provider=fallback_provider or provider,
         )
     except Exception:
         session["slash_worker"] = None
@@ -2612,6 +2672,14 @@ def _make_agent(
     cfg = _load_cfg()
     agent_cfg = cfg.get("agent") or {}
     system_prompt = _prompt_text(agent_cfg.get("system_prompt", ""))
+    disabled_toolsets = set(str(ts) for ts in (agent_cfg.get("disabled_toolsets") or []))
+    try:
+        with _sessions_lock:
+            session_state = _sessions.get(sid) or {}
+            if session_state.get("jarvis_direct_mode"):
+                disabled_toolsets.add("delegation")
+    except Exception:
+        pass
     startup_skills = _parse_tui_skills_env()
     if startup_skills:
         from agent.skill_commands import build_preloaded_skills_prompt
@@ -2655,6 +2723,8 @@ def _make_agent(
             requested=requested_provider,
             target_model=model or None,
         )
+    from hermes_cli.fallback_config import get_fallback_chain
+
     return AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
@@ -2673,7 +2743,9 @@ def _make_agent(
         verbose_logging=False,
         reasoning_config=_load_reasoning_config(),
         service_tier=_load_service_tier(),
+        fallback_model=get_fallback_chain(cfg) or None,
         enabled_toolsets=_load_enabled_toolsets(),
+        disabled_toolsets=sorted(disabled_toolsets) if disabled_toolsets else None,
         platform="tui",
         session_id=session_id or key,
         session_db=session_db if session_db is not None else _get_db(),
@@ -2708,6 +2780,8 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
             "tool_progress_mode": _load_tool_progress_mode(),
             "edit_snapshots": {},
             "tool_started_at": {},
+            "jarvis_direct_mode": False,
+            "jarvis_prev_disabled_toolsets": None,
             # Per-session model override set by an in-session /model switch.
             # Honored on rebuild (/new, resume) so a switch in THIS session
             # never leaks into siblings via process-global env vars.
@@ -2730,8 +2804,10 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
                 logger.debug("failed to persist resumed session cwd", exc_info=True)
     _register_session_cwd(_sessions[sid])
     try:
-        _sessions[sid]["slash_worker"] = _SlashWorker(
-            key, getattr(agent, "model", _resolve_model())
+        _sessions[sid]["slash_worker"] = _spawn_slash_worker(
+            key,
+            getattr(agent, "model", _resolve_model()),
+            provider=getattr(agent, "provider", None),
         )
     except Exception:
         # Defer hard-failure to slash.exec; chat still works without slash worker.
@@ -4809,12 +4885,57 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 raw = str(result)
                 status = "complete"
 
-            payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+            effective_provider = (
+                result.get("provider") if isinstance(result, dict) else None
+            ) or getattr(agent, "provider", None)
+            effective_model = (
+                result.get("model") if isinstance(result, dict) else None
+            ) or getattr(agent, "model", None)
+            effective_runtime_mode = (
+                result.get("runtime_mode") if isinstance(result, dict) else None
+            ) or (
+                "fallback" if bool(getattr(agent, "_fallback_activated", False)) else "primary"
+            )
+            effective_credential_label = (
+                result.get("active_credential_label") if isinstance(result, dict) else None
+            ) or ((getattr(agent, "_runtime_session_meta", {}) or {}).get("active_credential_label"))
+
+            canonical_raw = raw
+            try:
+                from gateway.runtime_footer import build_footer_line as _build_footer_line
+
+                _footer_line = _build_footer_line(
+                    user_config=_load_cfg(),
+                    platform_key="cli",
+                    model=effective_model,
+                    provider=effective_provider,
+                    runtime_mode=effective_runtime_mode,
+                    credential_label=effective_credential_label,
+                    context_tokens=getattr(getattr(agent, "context_compressor", None), "last_prompt_tokens", 0) or 0,
+                    context_length=getattr(getattr(agent, "context_compressor", None), "context_length", None),
+                    cwd=os.environ.get("TERMINAL_CWD", ""),
+                )
+            except Exception:
+                _footer_line = ""
+            display_raw = canonical_raw
+            if _footer_line and canonical_raw:
+                display_raw = f"{canonical_raw}\n\n{_footer_line}"
+
+            payload = {"text": display_raw, "usage": _get_usage(agent), "status": status}
+            runtime_payload = {
+                "mode": effective_runtime_mode,
+                "provider": effective_provider,
+                "model": effective_model,
+                "credential_label": effective_credential_label,
+            }
+            runtime_payload = {k: v for k, v in runtime_payload.items() if v not in (None, "")}
+            if runtime_payload:
+                payload["runtime"] = runtime_payload
             if last_reasoning:
                 payload["reasoning"] = last_reasoning
             if status_note:
                 payload["warning"] = status_note
-            rendered = render_message(raw, cols)
+            rendered = render_message(display_raw, cols)
             if rendered:
                 payload["rendered"] = rendered
             with session["history_lock"]:
@@ -6472,6 +6593,7 @@ _PENDING_INPUT_COMMANDS: frozenset[str] = frozenset(
         "steer",
         "plan",
         "goal",
+        "jarvis",
         "undo",
     }
 )

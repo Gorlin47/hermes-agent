@@ -116,6 +116,38 @@ class TestPrimaryRuntimeSnapshot:
 # =============================================================================
 
 class TestRestorePrimaryRuntime:
+    def test_reconciles_primary_runtime_from_live_pool(self):
+        """A recovered pool entry should refresh the next turn's primary runtime."""
+        agent = _make_agent(
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            fallback_model={"provider": "openrouter", "model": "openai/gpt-5.4-mini"},
+        )
+        setattr(agent, "_fallback_activated", True)
+
+        live_entry = MagicMock()
+        live_entry.id = "alazne-443dc5"
+        live_entry.label = "Codex · Alazne"
+        live_entry.runtime_api_key = "live-alazne-key"
+        live_entry.runtime_base_url = "https://chatgpt.com/backend-api/codex"
+
+        live_pool = MagicMock()
+        live_pool.has_credentials.return_value = True
+        live_pool.peek.return_value = live_entry
+
+        with (
+            patch("agent.credential_pool.load_pool", return_value=live_pool) as load_pool,
+            patch("run_agent.OpenAI", return_value=MagicMock()),
+        ):
+            result = agent._restore_primary_runtime()
+
+        assert result is True
+        load_pool.assert_called_once_with("openai-codex")
+        assert getattr(agent, "api_key") == "live-alazne-key"
+        assert getattr(agent, "_client_kwargs")["api_key"] == "live-alazne-key"
+        assert getattr(agent, "_primary_runtime")["api_key"] == "live-alazne-key"
+        assert getattr(agent, "_primary_runtime")["client_kwargs"]["api_key"] == "live-alazne-key"
+
     def test_noop_when_not_fallback(self):
         agent = _make_agent()
         assert agent._fallback_activated is False

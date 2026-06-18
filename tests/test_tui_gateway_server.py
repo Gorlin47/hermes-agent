@@ -2680,6 +2680,64 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
     assert captured["prompt"] == "expanded prompt"
 
 
+def test_prompt_submit_emits_effective_runtime_metadata(monkeypatch):
+    events = []
+
+    class _Agent:
+        model = "stale/default-model"
+        provider = "openai-codex"
+        base_url = ""
+        api_key = ""
+        _fallback_activated = False
+        _runtime_session_meta = {"active_credential_label": "Jonatan #1"}
+
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            return {
+                "final_response": "ok",
+                "messages": [{"role": "assistant", "content": "ok"}],
+                "model": "gpt-5.4-mini",
+                "provider": "openrouter",
+                "runtime_mode": "fallback",
+                "active_credential_label": "Jonatan #1",
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None, **kw):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: events.append(args))
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_sync_session_key_after_compress", lambda *a, **kw: None)
+
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "prompt.submit", "params": {"session_id": "sid", "text": "hello"}}
+        )
+
+        assert resp["result"]["status"] == "streaming"
+        message_complete = next(
+            args[2]
+            for args in events
+            if len(args) == 3 and args[0] == "message.complete"
+        )
+        assert message_complete["runtime"] == {
+            "credential_label": "Jonatan #1",
+            "mode": "fallback",
+            "model": "gpt-5.4-mini",
+            "provider": "openrouter",
+        }
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_image_attach_appends_local_image(monkeypatch):
     fake_cli = types.ModuleType("cli")
     fake_cli._IMAGE_EXTENSIONS = {".png"}

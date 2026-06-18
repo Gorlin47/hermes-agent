@@ -3,7 +3,7 @@ import type { MutableRefObject, ReactNode, RefObject, SetStateAction } from 'rea
 
 import type { PasteEvent } from '../components/textInput.js'
 import type { GatewayClient } from '../gatewayClient.js'
-import type { ImageAttachResponse, SessionCloseResponse } from '../gatewayTypes.js'
+import type { ImageAttachResponse, SessionCloseResponse, TurnRuntimeInfo } from '../gatewayTypes.js'
 import type { ParsedVoiceRecordKey } from '../lib/platform.js'
 import type { RpcResult } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
@@ -125,6 +125,7 @@ export interface UiState {
   notice: Notice | null
   pasteCollapseLines: number
   pasteCollapseChars: number
+  runtime: null | TurnRuntimeInfo
 
   sections: SectionVisibility
   showCost: boolean
