@@ -42,9 +42,37 @@ The mixer NEVER touches the inbound receive path: it only produces the bot's
 the mixer's output cannot echo back into transcription.
 """
 
+import importlib
 import logging
+import sys
 import threading
-from typing import TYPE_CHECKING, List, Optional
+from collections import deque
+from typing import TYPE_CHECKING, Deque, List, Optional
+
+
+def _load_discord_audio_source():
+    """Load discord.py's AudioSource class despite occasional module shadowing.
+
+    Some test/import paths can leave ``sys.modules['discord']`` bound to a
+    non-package module, which makes ``import discord.player`` fail even though
+    discord.py is installed.  discord.py itself validates playback sources
+    against this concrete class, so VoiceMixer must inherit from it whenever the
+    library is available.
+    """
+    try:
+        return importlib.import_module("discord.player").AudioSource
+    except Exception:
+        discord_mod = sys.modules.get("discord")
+        if discord_mod is not None and not hasattr(discord_mod, "__path__"):
+            sys.modules.pop("discord", None)
+            try:
+                return importlib.import_module("discord.player").AudioSource
+            except Exception:
+                pass
+    return object
+
+
+_DiscordAudioSource = _load_discord_audio_source()
 
 if TYPE_CHECKING:  # numpy is an optional ("voice" extra) dep — never import at runtime top-level
     import numpy as np
@@ -145,7 +173,111 @@ class MixerChild:
         return samples
 
 
-class VoiceMixer:
+class StreamingPCMChild:
+    """A bounded realtime PCM stream feeding into :class:`VoiceMixer`.
+
+    Producers append raw 48 kHz / stereo / s16le PCM via :meth:`write` while
+    discord.py drains one 20 ms frame at a time from :meth:`read_frame`.  The
+    queue drops the oldest frames when full to keep latency bounded; stale
+    realtime audio is worse than silence.
+    """
+
+    __slots__ = (
+        "name", "gain", "is_speech", "fade_frames", "_fade_done",
+        "_max_frames", "_frames", "_pending_pcm", "_closed", "_dropped_frames", "_lock",
+    )
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        max_frames: int = 50,
+        gain: float = 1.0,
+        is_speech: bool = True,
+        fade_in_ms: int = 0,
+    ):
+        self.name = name
+        self.gain = float(gain)
+        self.is_speech = bool(is_speech)
+        self.fade_frames = max(0, fade_in_ms // FRAME_LENGTH_MS)
+        self._fade_done = 0
+        self._max_frames = max(1, int(max_frames))
+        self._frames: Deque[bytes] = deque()
+        self._pending_pcm = bytearray()
+        self._closed = False
+        self._dropped_frames = 0
+        self._lock = threading.Lock()
+
+    @property
+    def active(self) -> bool:
+        with self._lock:
+            return (not self._closed) or bool(self._frames) or bool(self._pending_pcm)
+
+    @property
+    def finished(self) -> bool:
+        with self._lock:
+            return self._closed and not self._frames and not self._pending_pcm
+
+    @property
+    def dropped_frames(self) -> int:
+        with self._lock:
+            return self._dropped_frames
+
+    def _append_frame_locked(self, frame: bytes) -> None:
+        if len(self._frames) >= self._max_frames:
+            self._frames.popleft()
+            self._dropped_frames += 1
+        self._frames.append(frame)
+
+    def write(self, pcm: bytes) -> None:
+        """Append PCM bytes, emitting only complete 20 ms frames.
+
+        Realtime providers deliver arbitrary-sized deltas.  Padding every delta
+        to a full Discord frame inserts silence between chunks, which sounds
+        like stutter.  Keep residual bytes here and only pad the final tail when
+        the stream is closed.
+        """
+        if not pcm:
+            return
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Cannot write to a closed PCM stream")
+            self._pending_pcm.extend(pcm)
+            while len(self._pending_pcm) >= FRAME_SIZE:
+                frame = bytes(self._pending_pcm[:FRAME_SIZE])
+                del self._pending_pcm[:FRAME_SIZE]
+                self._append_frame_locked(frame)
+
+    def close(self) -> None:
+        """Mark the stream closed after already queued frames drain."""
+        with self._lock:
+            if self._pending_pcm:
+                tail = bytes(self._pending_pcm)
+                self._pending_pcm.clear()
+                if len(tail) < FRAME_SIZE:
+                    tail = tail + b"\x00" * (FRAME_SIZE - len(tail))
+                self._append_frame_locked(tail)
+            self._closed = True
+
+    def read_frame(self) -> "Optional[np.ndarray]":
+        """Return the next queued frame, or None on underrun/finished."""
+        with self._lock:
+            if not self._frames:
+                return None
+            chunk = self._frames.popleft()
+
+        np = _require_numpy()
+        samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+        gain = self.gain
+        if self.fade_frames and self._fade_done < self.fade_frames:
+            self._fade_done += 1
+            gain *= self._fade_done / self.fade_frames
+        if gain != 1.0:
+            samples = samples * gain
+        return samples
+
+
+class VoiceMixer(_DiscordAudioSource):  # type: ignore[misc, valid-type]
     """A continuous ``discord.AudioSource`` that mixes N child streams.
 
     Use :meth:`set_ambient` to install/replace the looping idle bed and
@@ -169,6 +301,7 @@ class VoiceMixer:
         self._lock = threading.Lock()
         self._ambient: Optional[MixerChild] = None
         self._speech: List[MixerChild] = []
+        self._streams: List[StreamingPCMChild] = []
         self._ambient_gain = float(ambient_gain)
         self._duck_gain = float(duck_gain)
         self._speech_gain = float(speech_gain)
@@ -233,6 +366,55 @@ class VoiceMixer:
             self._speech.clear()
             self._begin_duck_release_locked()
 
+    # ------------------------------------------------------------------
+    # Realtime PCM streams (OpenAI Realtime output, later phases)
+    # ------------------------------------------------------------------
+
+    def create_pcm_stream(
+        self,
+        name: str = "stream",
+        *,
+        max_frames: int = 50,
+        gain: Optional[float] = None,
+        is_speech: bool = True,
+        fade_in_ms: int = 40,
+    ) -> StreamingPCMChild:
+        """Create a bounded incremental PCM stream and attach it to the mixer.
+
+        ``max_frames`` bounds latency.  At 20 ms per frame, the default 50
+        frames is roughly one second of buffered audio; producers that outrun
+        Discord playback drop old frames instead of growing unbounded memory.
+        """
+        stream = StreamingPCMChild(
+            name,
+            max_frames=max_frames,
+            gain=self._speech_gain if gain is None else float(gain),
+            is_speech=is_speech,
+            fade_in_ms=fade_in_ms,
+        )
+        with self._lock:
+            self._streams.append(stream)
+            if is_speech:
+                self._speech_active = True
+                self._duck_release_left = 0
+                if self._ambient is not None:
+                    self._ambient.gain = self._duck_gain
+        return stream
+
+    @property
+    def streaming_active(self) -> bool:
+        with self._lock:
+            return any(stream.active for stream in self._streams)
+
+    def stop_streams(self) -> None:
+        """Close and detach all realtime PCM streams."""
+        with self._lock:
+            for stream in self._streams:
+                stream.close()
+            self._streams.clear()
+            if not self._speech:
+                self._begin_duck_release_locked()
+
     def _begin_duck_release_locked(self) -> None:
         self._speech_active = False
         self._duck_release_left = self._duck_release_frames
@@ -265,7 +447,23 @@ class VoiceMixer:
                     acc = frame if acc is None else acc + frame
                     still_live.append(child)
                 self._speech = still_live
-                if not self._speech and self._speech_active:
+                if not self._speech and self._speech_active and not any(s.active for s in self._streams):
+                    self._begin_duck_release_locked()
+
+            # Realtime PCM streams (drop closed+drained streams; underrun keeps stream alive)
+            if self._streams:
+                still_streaming: List[StreamingPCMChild] = []
+                stream_had_active_speech = False
+                for stream in self._streams:
+                    frame = stream.read_frame()
+                    if frame is not None:
+                        acc = frame if acc is None else acc + frame
+                    if stream.active:
+                        still_streaming.append(stream)
+                        if stream.is_speech:
+                            stream_had_active_speech = True
+                self._streams = still_streaming
+                if not self._speech and not stream_had_active_speech and self._speech_active:
                     self._begin_duck_release_locked()
 
             # Ambient bed — ramp gain back up during duck-release.
@@ -294,6 +492,7 @@ class VoiceMixer:
             self._closed = True
             self._ambient = None
             self._speech.clear()
+            self._streams.clear()
 
 
 # ----------------------------------------------------------------------

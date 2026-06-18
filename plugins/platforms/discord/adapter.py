@@ -364,6 +364,10 @@ class VoiceReceiver:
         # Pause flag: don't capture while bot is playing TTS
         self._paused = False
 
+        # Optional realtime callback: called with decoded Discord-native PCM
+        # frames/chunks before completed-utterance STT processing.
+        self._realtime_pcm_callback: Optional[Callable[..., None]] = None
+
         # Debug logging counter (instance-level to avoid cross-instance races)
         self._packet_debug_count = 0
 
@@ -402,6 +406,15 @@ class VoiceReceiver:
 
     def resume(self):
         self._paused = False
+
+    def set_realtime_pcm_callback(self, callback: Optional[Callable[..., None]]) -> None:
+        """Set a low-latency PCM callback for realtime voice mode.
+
+        ``callback`` is invoked from the Discord socket reader thread as
+        ``callback(user_id=<int>, pcm=<bytes>)`` after Opus decode.  The adapter
+        must marshal any coroutine work back onto the asyncio loop.
+        """
+        self._realtime_pcm_callback = callback
 
     # ------------------------------------------------------------------
     # SSRC -> user_id mapping via SPEAKING opcode hook
@@ -575,6 +588,18 @@ class VoiceReceiver:
             if ssrc not in self._decoders:
                 self._decoders[ssrc] = discord.opus.Decoder()
             pcm = self._decoders[ssrc].decode(decrypted)
+            realtime_callback = self._realtime_pcm_callback
+            realtime_user_id = 0
+            if realtime_callback is not None:
+                with self._lock:
+                    realtime_user_id = self._ssrc_to_user.get(ssrc, 0)
+                if not realtime_user_id:
+                    realtime_user_id = self._infer_user_for_ssrc(ssrc)
+                if realtime_user_id:
+                    try:
+                        realtime_callback(user_id=realtime_user_id, pcm=pcm)
+                    except Exception as cb_exc:
+                        logger.debug("Realtime PCM callback failed: %s", cb_exc)
             with self._lock:
                 self._buffers[ssrc].extend(pcm)
                 self._last_packet_time[ssrc] = time.monotonic()
@@ -767,6 +792,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Installed once per guild on join; lets acks / TTS / the "thinking"
         # loop overlap in one outgoing stream instead of stop-and-swap.
         self._voice_mixers: Dict[int, Any] = {}  # guild_id -> VoiceMixer
+        self._realtime_voice_sessions: Dict[int, Any] = {}  # guild_id -> DiscordRealtimeVoiceSession
         self._ambient_pcm_cache: Optional[bytes] = None  # decoded ambient bed
         self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
         # Track threads where the bot has participated so follow-up messages
@@ -2259,11 +2285,12 @@ class DiscordAdapter(BasePlatformAdapter):
         self._ambient_pcm_cache = pcm
         return pcm
 
-    async def _install_voice_mixer(self, guild_id: int, vc) -> None:
-        """Create a VoiceMixer, start the ambient bed, and play it on the VC.
+    async def _install_voice_mixer(self, guild_id: int, vc, *, ambient_enabled: Optional[bool] = None) -> None:
+        """Create a VoiceMixer and play it on the VC.
 
-        The mixer runs continuously for the life of the connection: one
-        ``vc.play(mixer)`` call, never stopped until leave.
+        The mixer is infrastructure for both optional voice effects and
+        realtime voice.  When ``ambient_enabled`` is false, the mixer runs as a
+        silent PCM output bus with no decorative ambient bed.
         """
         try:
             from voice_mixer import VoiceMixer
@@ -2275,7 +2302,12 @@ class DiscordAdapter(BasePlatformAdapter):
             duck_gain=float(self._voice_fx_cfg.get("duck_gain", 0.06)),
             speech_gain=float(self._voice_fx_cfg.get("speech_gain", 1.0)),
         )
-        ambient = await asyncio.to_thread(self._get_ambient_pcm)
+        use_ambient = (
+            bool(self._voice_fx_cfg.get("ambient_enabled", True))
+            if ambient_enabled is None
+            else bool(ambient_enabled)
+        )
+        ambient = await asyncio.to_thread(self._get_ambient_pcm) if use_ambient else None
         if ambient:
             mixer.set_ambient(ambient)
 
@@ -2350,6 +2382,163 @@ class DiscordAdapter(BasePlatformAdapter):
         mixers = getattr(self, "_voice_mixers", None)
         return bool(mixers) and mixers.get(guild_id) is not None
 
+    async def _ensure_realtime_voice_mixer(self, guild_id: int):
+        """Return a VoiceMixer suitable for realtime voice, installing it if needed.
+
+        Realtime requires the mixer as an output bus even when optional
+        ``discord.voice_fx`` effects are disabled. In that case we install a
+        silent mixer without ambient audio instead of requiring users to enable
+        voice effects globally.
+        """
+        mixers = getattr(self, "_voice_mixers", None)
+        if not isinstance(mixers, dict):
+            mixers = {}
+            self._voice_mixers = mixers
+
+        mixer = mixers.get(guild_id)
+        if mixer is not None and hasattr(mixer, "create_pcm_stream"):
+            return mixer
+
+        voice_clients = getattr(self, "_voice_clients", None) or {}
+        vc = voice_clients.get(guild_id)
+        if vc is None or not getattr(vc, "is_connected", lambda: False)():
+            raise RuntimeError("Realtime Discord voice requires a connected Discord voice client")
+
+        fx_cfg = getattr(self, "_voice_fx_cfg", {}) or {}
+        use_ambient = bool(fx_cfg.get("enabled")) and bool(fx_cfg.get("ambient_enabled", True))
+        await self._install_voice_mixer(guild_id, vc, ambient_enabled=use_ambient)
+
+        mixer = self._voice_mixers.get(guild_id)
+        if mixer is None or not hasattr(mixer, "create_pcm_stream"):
+            raise RuntimeError("VoiceMixer is required for realtime Discord voice")
+        return mixer
+
+    async def start_realtime_voice_session(
+        self,
+        *,
+        guild_id: int,
+        voice_channel,
+        source,
+        provider_factory: Optional[Callable[..., Any]] = None,
+    ):
+        """Create and start an OpenAI-backed realtime voice session.
+
+        The voice channel must already have the continuous ``VoiceMixer``
+        installed. The returned session receives model audio through a bounded
+        PCM stream created on that mixer.
+        """
+        mixer = await self._ensure_realtime_voice_mixer(guild_id)
+
+        sessions = getattr(self, "_realtime_voice_sessions", None)
+        if not isinstance(sessions, dict):
+            sessions = {}
+            self._realtime_voice_sessions = sessions
+
+        existing = sessions.pop(guild_id, None)
+        if existing is not None:
+            await existing.stop("replaced")
+
+        output_stream = mixer.create_pcm_stream(
+            "openai-realtime",
+            # OpenAI Realtime often emits output audio faster than wall-clock
+            # playback.  A one-second queue drops most of a normal response,
+            # which sounds like missing milliseconds rather than silence.
+            # Keep the queue bounded, but large enough for a short spoken reply.
+            max_frames=600,
+            is_speech=True,
+            fade_in_ms=20,
+        )
+
+        try:
+            from .realtime_voice import DiscordRealtimeVoiceSession, OpenAIRealtimeProvider
+        except ImportError:  # pragma: no cover - direct plugin path import fallback
+            from realtime_voice import DiscordRealtimeVoiceSession, OpenAIRealtimeProvider
+
+        cfg = getattr(self.config, "extra", {}) or {}
+        realtime_cfg = cfg.get("voice_realtime") or cfg.get("realtime") or {}
+        model = realtime_cfg.get("model", "gpt-realtime")
+        instructions = realtime_cfg.get(
+            "instructions",
+            "Eres J.A.R.V.I.S. Responde en español de forma breve y natural.",
+        )
+
+        if provider_factory is None:
+            provider = OpenAIRealtimeProvider(
+                model=model,
+                output_stream=output_stream,
+                instructions=instructions,
+                tool_handler=lambda name, arguments: self.handle_realtime_tool(guild_id, name, arguments),
+            )
+        else:
+            provider = provider_factory(
+                model=model,
+                output_stream=output_stream,
+                instructions=instructions,
+            )
+
+        session = DiscordRealtimeVoiceSession(
+            guild_id=guild_id,
+            voice_channel_id=int(getattr(voice_channel, "id", 0) or 0),
+            text_channel_id=int(getattr(source, "chat_id", 0) or 0),
+            source=source,
+            provider=provider,
+        )
+        await session.start()
+        receiver = getattr(self, "_voice_receivers", {}).get(guild_id)
+        if receiver is not None and hasattr(receiver, "set_realtime_pcm_callback"):
+            loop = asyncio.get_running_loop()
+
+            def _forward_realtime_pcm(*, user_id: int, pcm: bytes) -> None:
+                try:
+                    guild = self._client.get_guild(guild_id) if getattr(self, "_client", None) is not None else None
+                    if not self._is_allowed_user(str(user_id), guild=guild, is_dm=False):
+                        return
+                except Exception:
+                    return
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(
+                        session.send_audio_frame(pcm, user_id=user_id)
+                    )
+                )
+
+            receiver.set_realtime_pcm_callback(_forward_realtime_pcm)
+        sessions[guild_id] = session
+        return session
+
+    async def handle_realtime_tool(self, guild_id: int, name: str, arguments: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Handle a narrow allowlisted realtime voice tool request."""
+        try:
+            from .realtime_tools import dispatch_realtime_tool
+        except ImportError:  # pragma: no cover - direct plugin path import fallback
+            from realtime_tools import dispatch_realtime_tool
+
+        result = dispatch_realtime_tool(name, arguments or {})
+        if not result.get("ok"):
+            return result
+        if name == "leave_voice_channel":
+            await self.leave_voice_channel(guild_id)
+            return {
+                "ok": True,
+                "tool": name,
+                "arguments": arguments or {},
+                "message": "Me desconecto del canal de voz.",
+            }
+        return result
+
+    async def stop_realtime_voice_session(self, guild_id: int) -> bool:
+        """Stop and remove the realtime voice session for a guild."""
+        sessions = getattr(self, "_realtime_voice_sessions", None)
+        if not isinstance(sessions, dict):
+            return False
+        session = sessions.pop(guild_id, None)
+        if session is None:
+            return False
+        receiver = getattr(self, "_voice_receivers", {}).get(guild_id)
+        if receiver is not None and hasattr(receiver, "set_realtime_pcm_callback"):
+            receiver.set_realtime_pcm_callback(None)
+        await session.stop("leave")
+        return True
+
     async def join_voice_channel(self, channel) -> bool:
         """Join a Discord voice channel. Returns True on success."""
         if not self._client or not DISCORD_AVAILABLE:
@@ -2396,6 +2585,9 @@ class DiscordAdapter(BasePlatformAdapter):
     async def leave_voice_channel(self, guild_id: int) -> None:
         """Disconnect from the voice channel in a guild."""
         async with self._voice_locks.setdefault(guild_id, asyncio.Lock()):
+            # Stop realtime provider/session before tearing down mixer/voice.
+            await self.stop_realtime_voice_session(guild_id)
+
             # Stop voice receiver first
             receiver = self._voice_receivers.pop(guild_id, None)
             if receiver:
@@ -3545,13 +3737,16 @@ class DiscordAdapter(BasePlatformAdapter):
             await self._run_simple_slash(interaction, "/reload-skills")
 
         @tree.command(name="voice", description="Toggle voice reply mode")
-        @discord.app_commands.describe(mode="Voice mode: join, channel, leave, on, tts, off, or status")
+        @discord.app_commands.describe(mode="Voice mode: join, realtime, channel, leave, on, tts, off, or status")
         @discord.app_commands.choices(mode=[
             # `join` and `channel` both route to _handle_voice_channel_join in
             # gateway/run.py — expose both in the slash UI so autocomplete
             # matches what the docs advertise and what the runner accepts when
-            # the command is typed as plain text.
+            # the command is typed as plain text. `realtime` is the separate
+            # streaming path; it must be in Discord's closed choices list or
+            # Discord rejects the option before Hermes sees the interaction.
             discord.app_commands.Choice(name="join — join your voice channel", value="join"),
+            discord.app_commands.Choice(name="realtime — realtime streaming voice", value="realtime"),
             discord.app_commands.Choice(name="channel — join your voice channel (alias)", value="channel"),
             discord.app_commands.Choice(name="leave — leave voice channel", value="leave"),
             discord.app_commands.Choice(name="on — voice reply to voice messages", value="on"),

@@ -47,9 +47,14 @@ class TestVoiceMixerCore:
             assert len(frame) == vm.FRAME_SIZE
             assert frame == vm.SILENCE_FRAME
 
-    def test_is_opus_false(self):
+    def test_is_discord_audio_source_and_is_opus_false(self):
+        mixer = vm.VoiceMixer()
+
+        # discord.py validates with isinstance(source, AudioSource), not just duck typing.
+        assert vm._DiscordAudioSource is not object
+        assert isinstance(mixer, vm._DiscordAudioSource)
         # discord.py sends raw PCM when is_opus() is False.
-        assert vm.VoiceMixer().is_opus() is False
+        assert mixer.is_opus() is False
 
     def test_ambient_loops_and_is_quiet(self):
         mx = vm.VoiceMixer(ambient_gain=0.2)
@@ -123,6 +128,85 @@ class TestVoiceMixerCore:
         pcm = vm.synth_ambient_pcm(seconds=1.0)
         assert len(pcm) % (vm.CHANNELS * vm.SAMPLE_WIDTH) == 0
         assert len(pcm) % vm.FRAME_SIZE == 0
+
+    def test_realtime_pcm_stream_emits_frames_incrementally(self):
+        mx = vm.VoiceMixer()
+        stream = mx.create_pcm_stream("realtime", max_frames=4, fade_in_ms=0)
+        frame_a = (np.ones(vm.SAMPLES_PER_FRAME * vm.CHANNELS) * 1000).astype(np.int16).tobytes()
+        frame_b = (np.ones(vm.SAMPLES_PER_FRAME * vm.CHANNELS) * 2000).astype(np.int16).tobytes()
+
+        stream.write(frame_a)
+        out_a = np.frombuffer(mx.read(), dtype=np.int16)
+        stream.write(frame_b)
+        out_b = np.frombuffer(mx.read(), dtype=np.int16)
+
+        assert int(out_a[0]) == 1000
+        assert int(out_b[0]) == 2000
+        assert stream.active is True
+
+    def test_realtime_pcm_stream_buffers_partial_write_without_padding_silence(self):
+        mx = vm.VoiceMixer()
+        stream = mx.create_pcm_stream("realtime", max_frames=4, fade_in_ms=0)
+        partial = (np.ones((vm.SAMPLES_PER_FRAME * vm.CHANNELS) // 2) * 1000).astype(np.int16).tobytes()
+
+        stream.write(partial)
+
+        assert mx.read() == vm.SILENCE_FRAME
+        assert stream.active is True
+
+    def test_realtime_pcm_stream_coalesces_partial_writes_into_continuous_frame(self):
+        mx = vm.VoiceMixer()
+        stream = mx.create_pcm_stream("realtime", max_frames=4, fade_in_ms=0)
+        partial_a = (np.ones((vm.SAMPLES_PER_FRAME * vm.CHANNELS) // 2) * 1000).astype(np.int16).tobytes()
+        partial_b = (np.ones((vm.SAMPLES_PER_FRAME * vm.CHANNELS) // 2) * 2000).astype(np.int16).tobytes()
+
+        stream.write(partial_a)
+        stream.write(partial_b)
+        out = np.frombuffer(mx.read(), dtype=np.int16)
+
+        assert int(out[0]) == 1000
+        assert int(out[(vm.SAMPLES_PER_FRAME * vm.CHANNELS) // 2]) == 2000
+        assert not np.any(out[:(vm.SAMPLES_PER_FRAME * vm.CHANNELS) // 2] == 0)
+        assert not np.any(out[(vm.SAMPLES_PER_FRAME * vm.CHANNELS) // 2:] == 0)
+
+    def test_realtime_pcm_stream_underrun_returns_silence_without_closing(self):
+        mx = vm.VoiceMixer()
+        stream = mx.create_pcm_stream("realtime", max_frames=2)
+
+        assert mx.read() == vm.SILENCE_FRAME
+        assert stream.active is True
+        assert mx.streaming_active is True
+
+    def test_realtime_pcm_stream_queue_is_bounded_and_drops_oldest_frames(self):
+        mx = vm.VoiceMixer()
+        stream = mx.create_pcm_stream("realtime", max_frames=2, fade_in_ms=0)
+        frames = [
+            (np.ones(vm.SAMPLES_PER_FRAME * vm.CHANNELS) * value).astype(np.int16).tobytes()
+            for value in (1000, 2000, 3000)
+        ]
+
+        for frame in frames:
+            stream.write(frame)
+
+        out_1 = np.frombuffer(mx.read(), dtype=np.int16)
+        out_2 = np.frombuffer(mx.read(), dtype=np.int16)
+
+        assert stream.dropped_frames == 1
+        assert int(out_1[0]) == 2000
+        assert int(out_2[0]) == 3000
+
+    def test_realtime_pcm_stream_close_drains_then_removes_stream(self):
+        mx = vm.VoiceMixer()
+        stream = mx.create_pcm_stream("realtime", max_frames=2, fade_in_ms=0)
+        frame = (np.ones(vm.SAMPLES_PER_FRAME * vm.CHANNELS) * 1234).astype(np.int16).tobytes()
+
+        stream.write(frame)
+        stream.close()
+
+        assert int(np.frombuffer(mx.read(), dtype=np.int16)[0]) == 1234
+        assert mx.read() == vm.SILENCE_FRAME
+        assert stream.active is False
+        assert mx.streaming_active is False
 
 
 # =====================================================================
