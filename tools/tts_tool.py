@@ -981,13 +981,8 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     """
     Generate audio using OpenAI TTS.
 
-    Args:
-        text: Text to convert.
-        output_path: Where to save the audio file.
-        tts_config: TTS config dict.
-
-    Returns:
-        Path to the saved audio file.
+    Supports both the classic speech endpoint and the multimodal audio models
+    exposed through OpenRouter (e.g. openai/gpt-audio-mini).
     """
     api_key, base_url = _resolve_openai_audio_client_config()
 
@@ -996,16 +991,62 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     voice = oai_config.get("voice", DEFAULT_OPENAI_VOICE)
     base_url = oai_config.get("base_url", base_url)
     speed = float(oai_config.get("speed", tts_config.get("speed", 1.0)))
+    instructions = oai_config.get("instructions") or oai_config.get("system_prompt")
 
     # Determine response format from extension
     if output_path.endswith(".ogg"):
         response_format = "opus"
     else:
         response_format = "mp3"
+    multimodal_audio_format = "pcm16"
 
     OpenAIClient = _import_openai_client()
     client = OpenAIClient(api_key=api_key, base_url=base_url)
     try:
+        if model in {"openai/gpt-audio-mini", "openai/gpt-audio"}:
+            # Multimodal audio models require streaming on OpenRouter.
+            # We accumulate audio deltas and write the decoded payload to disk.
+            create_kwargs = {
+                "model": model,
+                "modalities": ["text", "audio"],
+                "audio": {"voice": voice, "format": multimodal_audio_format},
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": text,
+                    }
+                ],
+                "stream": True,
+                "extra_headers": {"x-idempotency-key": str(uuid.uuid4())},
+            }
+            if isinstance(instructions, str) and instructions.strip():
+                create_kwargs["messages"].insert(0, {"role": "system", "content": instructions.strip()})
+            if speed != 1.0:
+                # Kept for compatibility with the config surface, even if the
+                # multimodal path may ignore it.
+                create_kwargs["temperature"] = 0.7
+            stream = client.chat.completions.create(**create_kwargs)
+            audio_chunks = []
+            for event in stream:
+                choices = getattr(event, "choices", None) or []
+                for choice in choices:
+                    delta = getattr(choice, "delta", None)
+                    if not delta:
+                        continue
+                    audio = getattr(delta, "audio", None)
+                    if not audio:
+                        continue
+                    data = getattr(audio, "data", None)
+                    if isinstance(data, str) and data:
+                        audio_chunks.append(data)
+            audio_data = "".join(audio_chunks).strip()
+            if not audio_data:
+                raise RuntimeError("OpenRouter audio model returned no audio data")
+            audio_bytes = base64.b64decode(audio_data)
+            with open(output_path, "wb") as f:
+                f.write(audio_bytes)
+            return output_path
+
         create_kwargs = {
             "model": model,
             "voice": voice,
@@ -1015,6 +1056,8 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         }
         if speed != 1.0:
             create_kwargs["speed"] = max(0.25, min(4.0, speed))
+        if isinstance(instructions, str) and instructions.strip():
+            create_kwargs["instructions"] = instructions.strip()
         response = client.audio.speech.create(**create_kwargs)
 
         response.stream_to_file(output_path)
@@ -1023,6 +1066,7 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         close = getattr(client, "close", None)
         if callable(close):
             close()
+
 
 
 # ===========================================================================

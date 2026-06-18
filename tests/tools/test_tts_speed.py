@@ -113,6 +113,12 @@ class TestOpenaiTtsSpeed:
         kwargs = create.call_args[1]
         assert kwargs["speed"] == 4.0
 
+    def test_instructions_passed_when_configured(self, tmp_path, monkeypatch):
+        """tts.openai.instructions is forwarded to OpenAI speech synthesis."""
+        create = self._run({"openai": {"instructions": "Speak European Spanish."}}, tmp_path, monkeypatch)
+        kwargs = create.call_args[1]
+        assert kwargs["instructions"] == "Speak European Spanish."
+
 
 # ---------------------------------------------------------------------------
 # MiniMax TTS (t2a_v2 endpoint: nested voice_setting/audio_setting,
