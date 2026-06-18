@@ -9,6 +9,7 @@ import { useTurnSelector } from '../app/turnStore.js'
 import { DEV_CREDITS_MODE } from '../config/env.js'
 import { FACES } from '../content/faces.js'
 import { VERBS } from '../content/verbs.js'
+import type { TurnRuntimeInfo } from '../gatewayTypes.js'
 import { fmtDuration } from '../domain/messages.js'
 import { stickyPromptFromViewport } from '../domain/viewport.js'
 import { buildSubagentTree, treeTotals, widthByDepth } from '../lib/subagentTree.js'
@@ -377,6 +378,57 @@ const shortModelLabel = (model: string) =>
 const modelLabel = (model: string, effort?: string, fast?: boolean) =>
   [shortModelLabel(model), effortLabel(effort), fast ? 'fast' : ''].filter(Boolean).join(' ')
 
+const shortProviderLabel = (provider?: string) => {
+  const raw = String(provider ?? '').trim().toLowerCase()
+
+  if (!raw) {
+    return ''
+  }
+
+  if (raw === 'openai-codex') {
+    return 'codex'
+  }
+
+  if (raw === 'openai-api') {
+    return 'openai'
+  }
+
+  return raw.replace(/^custom:/, '')
+}
+
+const runtimeModeLabel = (mode?: string) => {
+  switch (String(mode ?? '').trim().toLowerCase()) {
+    case 'fallback':
+      return 'FALLBACK'
+    case 'restored':
+      return 'RESTORED'
+    case 'primary':
+      return 'PRIMARY'
+    default:
+      return ''
+  }
+}
+
+const runtimeBadgeLabel = (runtime?: TurnRuntimeInfo | null) => {
+  const mode = runtimeModeLabel(runtime?.mode)
+  const provider = shortProviderLabel(runtime?.provider)
+
+  return [mode, provider].filter(Boolean).join(' ')
+}
+
+const runtimeBadgeColor = (runtime: TurnRuntimeInfo | null | undefined, t: Theme) => {
+  switch (runtime?.mode) {
+    case 'fallback':
+      return t.color.warn
+    case 'restored':
+      return t.color.accent
+    case 'primary':
+      return t.color.ok
+    default:
+      return t.color.muted
+  }
+}
+
 export function GoodVibesHeart({ tick, t }: { tick: number; t: Theme }) {
   const [active, setActive] = useState(false)
   const [color, setColor] = useState(t.color.accent)
@@ -411,6 +463,7 @@ export function StatusRule({
   model,
   modelFast,
   modelReasoningEffort,
+  runtime,
   indicatorStyle = 'kaomoji',
   notice,
   usage,
@@ -440,6 +493,7 @@ export function StatusRule({
 
   const bar = !segs.compactCtx && usage.context_max ? ctxBar(pct) : ''
   const modelText = modelLabel(model, modelReasoningEffort, modelFast)
+  const runtimeText = runtimeBadgeLabel(runtime)
 
   // A credits notice replaces the status/verb slot, but only when idle —
   // while busy the FaceTicker always wins (R1 render priority). The notice
@@ -467,6 +521,7 @@ export function StatusRule({
   const essentialWidth =
     stringWidth('─ ') +
     slotWidth +
+    (runtimeText ? stringWidth(' │ ') + stringWidth(runtimeText) : 0) +
     stringWidth(' │ ') +
     stringWidth(modelText) +
     (ctxLabel ? stringWidth(' │ ') + stringWidth(ctxLabel) : 0)
@@ -557,8 +612,14 @@ export function StatusRule({
             </Text>
           </Box>
         ) : null}
-        {/* Pinned essentials — model + context never shrink, always visible. */}
+        {/* Pinned essentials — runtime + model + context never shrink, always visible. */}
         <Box flexDirection="row" flexShrink={0}>
+          {runtimeText ? (
+            <Text color={runtimeBadgeColor(runtime, t)} wrap="truncate-end">
+              {' │ '}
+              {runtimeText}
+            </Text>
+          ) : null}
           {DEV_CREDITS_MODE ? (
             <Text color={t.color.warn} wrap="truncate-end">
               {' (dev credits)'}
@@ -759,6 +820,7 @@ interface StatusRuleProps {
   model: string
   modelFast?: boolean
   modelReasoningEffort?: string
+  runtime?: TurnRuntimeInfo | null
   indicatorStyle?: IndicatorStyle
   notice?: Notice | null
   sessionStartedAt?: null | number

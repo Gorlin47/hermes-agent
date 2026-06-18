@@ -90,6 +90,12 @@ def build_turn_context(
 
     agent._ensure_db_session()
 
+    # Restore the primary runtime if the previous turn activated fallback.
+    # This must happen before we publish the turn's live runtime to helper
+    # clients, otherwise the UI and auxiliary tools keep seeing the stale
+    # fallback model for one more message.
+    agent._restore_primary_runtime()
+
     # Tell auxiliary_client what the live main provider/model are for this turn.
     try:
         from agent.auxiliary_client import set_runtime_main
@@ -109,19 +115,11 @@ def build_turn_context(
     # Bind the skill write-origin ContextVar for this thread.
     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
 
-    # Restore the primary runtime if the previous turn activated fallback.
-    agent._restore_primary_runtime()
-
     # Between-turns MCP refresh: an MCP server that finished connecting since
     # the previous turn (slow HTTP/OAuth servers routinely take 2-6s on a cold
     # connect, missing the bounded startup wait) lands in THIS turn's tool
-    # snapshot.  This is cache-safe by construction: it runs in the per-turn
-    # prologue, before this turn's first API call assembles ``tools=``, so it
-    # only ever extends a fresh request prefix — it never mutates the cached
-    # prefix of an in-flight turn.  No-op when no MCP servers are registered
-    # (the common case, gated by the cheap ``has_registered_mcp_tools`` check)
-    # or when the tool set is unchanged (``refresh_agent_mcp_tools`` diffs by
-    # name and leaves the snapshot untouched on no-change).
+    # snapshot. This stays in the per-turn prologue and does not mutate any
+    # in-flight turn prefix.
     try:
         if not getattr(agent, "_skip_mcp_refresh", False):
             from tools.mcp_tool import has_registered_mcp_tools, refresh_agent_mcp_tools
