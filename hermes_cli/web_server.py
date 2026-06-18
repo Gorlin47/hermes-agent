@@ -278,12 +278,33 @@ def should_require_auth(host: str, allow_public: bool) -> bool:
     return (host not in _LOOPBACK_HOST_VALUES) and (not allow_public)
 
 
-def _is_accepted_host(host_header: str, bound_host: str) -> bool:
+def _resolve_dashboard_public_host() -> str:
+    """Return the hostname from the configured dashboard public URL.
+
+    ``dashboard.public_url`` / ``HERMES_DASHBOARD_PUBLIC_URL`` is the
+    operator-declared canonical authority for reverse-proxy deployments
+    such as Tailscale Serve. The value is already normalised by
+    ``dashboard_auth.prefix.resolve_public_url``; here we only extract the
+    hostname so Host/Origin and websocket peer checks can recognise the
+    trusted public endpoint without relaxing rebinding protection.
+    """
+    from hermes_cli.dashboard_auth.prefix import resolve_public_url
+
+    public_url = resolve_public_url()
+    if not public_url:
+        return ""
+    parsed = urllib.parse.urlparse(public_url)
+    return (parsed.hostname or "").strip().lower()
+
+
+def _is_accepted_host(host_header: str, bound_host: str, public_host: str = "") -> bool:
     """True if the Host header targets the interface we bound to.
 
     Accepts:
     - Exact bound host (with or without port suffix)
     - Loopback aliases when bound to loopback
+    - The configured trusted public host when serving behind a reverse
+      proxy and ``dashboard.public_url`` is set
     - Any host when bound to 0.0.0.0 (explicit opt-in to non-loopback,
       no protection possible at this layer)
     """
@@ -313,13 +334,18 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     if bound_host in {"0.0.0.0", "::"}:
         return True
 
-    # Loopback bind: accept the loopback names
+    # Loopback bind: accept the loopback names and the operator-declared
+    # public host if the dashboard is published behind a trusted proxy.
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
-        return host_only in _LOOPBACK_HOST_VALUES
+        return host_only in _LOOPBACK_HOST_VALUES or (
+            public_host and host_only == public_host
+        )
 
-    # Explicit non-loopback bind: require exact host match
-    return host_only == bound_lc
+    # Explicit non-loopback bind: require exact host match, but still
+    # allow the configured public host if the operator chose to publish
+    # behind a trusted reverse proxy.
+    return host_only == bound_lc or (public_host and host_only == public_host)
 
 
 @app.middleware("http")
@@ -337,9 +363,10 @@ async def host_header_middleware(request: Request, call_next):
     # Store the bound host on app.state so this middleware can read it —
     # set by start_server() at listen time.
     bound_host = getattr(app.state, "bound_host", None)
+    public_host = getattr(app.state, "public_host", "") or ""
     if bound_host:
         host_header = request.headers.get("host", "")
-        if not _is_accepted_host(host_header, bound_host):
+        if not _is_accepted_host(host_header, bound_host, public_host):
             return JSONResponse(
                 status_code=400,
                 content={
@@ -8265,12 +8292,15 @@ def _ws_client_reason(ws: "WebSocket") -> Optional[str]:
     if getattr(app.state, "auth_required", False):
         return None
     bound_host = (getattr(app.state, "bound_host", "") or "").strip().lower()
+    public_host = (getattr(app.state, "public_host", "") or "").strip().lower()
     if bound_host and bound_host not in _LOOPBACK_HOSTS:
         return None
     client_host = ws.client.host if ws.client else ""
     if not client_host:
         return None
     if client_host in _LOOPBACK_HOSTS:
+        return None
+    if public_host:
         return None
     return f"peer_not_loopback peer={client_host} bound={bound_host or '?'}"
 
@@ -8291,6 +8321,11 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
     requires the Host header to match the bound interface — the same
     defence ``_is_accepted_host`` applies to non-loopback HTTP requests.
 
+    Trusted reverse-proxy mode: when ``dashboard.public_url`` is set,
+    accept the proxy's non-loopback peer IP as long as Host/Origin already
+    matched the declared public authority. The proxy isn't the attacker;
+    the rebinding check is.
+
     Gated mode: any peer is allowed — uvicorn's ``proxy_headers=True``
     (enabled when the OAuth gate is active so cookies can pick up
     ``X-Forwarded-Proto``) rewrites ``ws.client.host`` to the
@@ -8307,12 +8342,13 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
     # an actual loopback bind; otherwise the WS handshake is rejected even
     # though same-bind HTTP requests pass _is_accepted_host.
     bound_host = (getattr(app.state, "bound_host", "") or "").strip().lower()
+    public_host = (getattr(app.state, "public_host", "") or "").strip().lower()
     if bound_host and bound_host not in _LOOPBACK_HOSTS:
         return True
     client_host = ws.client.host if ws.client else ""
     if not client_host:
         return True
-    return client_host in _LOOPBACK_HOSTS
+    return client_host in _LOOPBACK_HOSTS or bool(public_host)
 
 
 def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
@@ -8323,11 +8359,12 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     on rejection so the close path can log *why* the upgrade was refused.
     """
     bound_host = getattr(app.state, "bound_host", None)
+    public_host = getattr(app.state, "public_host", "") or ""
     if not bound_host:
         return None
 
     host_header = ws.headers.get("host", "")
-    if not _is_accepted_host(host_header, bound_host):
+    if not _is_accepted_host(host_header, bound_host, public_host):
         return f"host_mismatch host={host_header or '?'} bound={bound_host}"
 
     origin = ws.headers.get("origin", "")
@@ -8344,7 +8381,7 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     if not parsed.netloc:
         return f"origin_mismatch origin={origin} bound={bound_host}"
 
-    if not _is_accepted_host(parsed.netloc, bound_host):
+    if not _is_accepted_host(parsed.netloc, bound_host, public_host):
         return f"origin_mismatch origin={origin} bound={bound_host}"
     return None
 
@@ -10042,6 +10079,7 @@ def start_server(
     # PTY child uses to publish events to the dashboard sidebar.
     app.state.bound_host = host
     app.state.bound_port = port
+    app.state.public_host = _resolve_dashboard_public_host()
 
     if open_browser:
         import webbrowser

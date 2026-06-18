@@ -4484,6 +4484,8 @@ def run_conversation(
         "model": agent.model,
         "provider": agent.provider,
         "base_url": agent.base_url,
+        "runtime_mode": "fallback" if getattr(agent, "_fallback_activated", False) else "primary",
+        "active_credential_label": ((getattr(agent, "_runtime_session_meta", {}) or {}).get("active_credential_label")),
         "input_tokens": agent.session_input_tokens,
         "output_tokens": agent.session_output_tokens,
         "cache_read_tokens": agent.session_cache_read_tokens,

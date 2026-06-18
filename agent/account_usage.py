@@ -337,15 +337,34 @@ def _snapshot_from_credits_state(state) -> Optional[AccountUsageSnapshot]:
         return None
 
 
-def _resolve_codex_usage_url(base_url: str) -> str:
+def _candidate_codex_usage_urls(base_url: str) -> list[str]:
     normalized = (base_url or "").strip().rstrip("/")
     if not normalized:
         normalized = "https://chatgpt.com/backend-api/codex"
-    if normalized.endswith("/codex"):
-        normalized = normalized[: -len("/codex")]
+
+    candidates: list[str] = []
+
+    def add(url: str) -> None:
+        if url and url not in candidates:
+            candidates.append(url)
+
+    # Prefer the current Codex usage endpoint, but keep the older routes as
+    # fallbacks so a backend path shuffle does not turn quota telemetry into a
+    # false "unavailable" state.
+    add(f"{normalized}/usage")
+
+    stripped = normalized[:-len("/codex")] if normalized.endswith("/codex") else normalized
     if "/backend-api" in normalized:
-        return normalized + "/wham/usage"
-    return normalized + "/api/codex/usage"
+        add(f"{stripped}/wham/usage")
+        add(f"{stripped}/codex/usage")
+    add(f"{stripped}/api/codex/usage")
+    add(f"{normalized}/wham/usage")
+
+    return candidates
+
+
+def _resolve_codex_usage_url(base_url: str) -> str:
+    return _candidate_codex_usage_urls(base_url)[0]
 
 
 def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
@@ -360,10 +379,32 @@ def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
     }
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
+
+    payload: dict[str, Any] | None = None
+    last_error: Exception | None = None
     with httpx.Client(timeout=15.0) as client:
-        response = client.get(_resolve_codex_usage_url(creds.get("base_url", "")), headers=headers)
-        response.raise_for_status()
-    payload = response.json() or {}
+        for url in _candidate_codex_usage_urls(creds.get("base_url", "")):
+            try:
+                response = client.get(url, headers=headers)
+                response.raise_for_status()
+                payload = response.json() or {}
+                break
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status not in {404, 405, 410}:
+                    raise
+            except Exception:
+                last_error = None
+                break
+        else:
+            if last_error is not None:
+                raise last_error
+            return None
+
+    if not payload:
+        return None
+
     rate_limit = payload.get("rate_limit") or {}
     windows: list[AccountUsageWindow] = []
     for key, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):

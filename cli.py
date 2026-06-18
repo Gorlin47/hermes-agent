@@ -7864,6 +7864,8 @@ class HermesCLI(CLICommandsMixin):
             self._handle_reasoning_command(cmd_original)
         elif canonical == "fast":
             self._handle_fast_command(cmd_original)
+        elif canonical == "jarvis":
+            self._handle_jarvis_command(cmd_original)
         elif canonical == "compress":
             self._manual_compress(cmd_original)
         elif canonical == "usage":
