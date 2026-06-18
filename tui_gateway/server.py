@@ -2102,11 +2102,6 @@ def _restart_slash_worker(sid: str, session: dict):
     except Exception:
         session["slash_worker"] = None
         return
-    # Route through the same store-iff-still-mapped guard as the spawn sites:
-    # the post-turn restart runs as `running` flips false, exactly when a
-    # close_on_disconnect reap can pop this session — a bare store would orphan
-    # the fresh worker (it self-heals only on gateway exit via the watchdog).
-    _attach_worker(sid, session, new_worker)
 
 
 def _persist_model_switch(result) -> None:
