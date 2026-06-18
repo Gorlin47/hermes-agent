@@ -508,17 +508,78 @@ class AIAgent:
             logger.debug("SessionDB unavailable for recall", exc_info=True)
             return None
 
+    def _credential_runtime_meta(self, entry=None) -> Dict[str, Any]:
+        """Return safe metadata describing the currently bound pooled credential."""
+        target = entry
+        if target is None:
+            pool = getattr(self, "_credential_pool", None)
+            if pool is not None:
+                try:
+                    target = pool.current()
+                except Exception:
+                    target = None
+        if target is None:
+            return {}
+
+        meta = {
+            "active_credential_id": getattr(target, "id", None),
+            "active_credential_label": getattr(target, "label", None),
+            "active_credential_source": getattr(target, "source", None),
+            "credential_observed_at": time.time(),
+        }
+        return {k: v for k, v in meta.items() if v not in (None, "")}
+
+    def _build_session_runtime_meta(self) -> Dict[str, Any]:
+        """Assemble the model_config payload for the live session row."""
+        meta = dict(getattr(self, "_session_init_model_config", {}) or {})
+        provider = getattr(self, "provider", None)
+        base_url = getattr(self, "base_url", None)
+        api_mode = getattr(self, "api_mode", None)
+        if isinstance(provider, str) and provider.strip():
+            meta["provider"] = provider.strip()
+        if isinstance(base_url, str) and base_url.strip():
+            meta["base_url"] = base_url.strip()
+        if isinstance(api_mode, str) and api_mode.strip():
+            meta["api_mode"] = api_mode.strip()
+        runtime_meta = getattr(self, "_runtime_session_meta", None)
+        if isinstance(runtime_meta, dict):
+            meta.update({k: v for k, v in runtime_meta.items() if v not in (None, "")})
+        return meta
+
+    def _persist_runtime_session_meta(self) -> None:
+        """Persist current runtime metadata into the session DB when available."""
+        if not self._session_db or not getattr(self, "session_id", None):
+            return
+        try:
+            if not self._session_db_created:
+                self._ensure_db_session()
+            if not self._session_db_created:
+                return
+            self._session_db.update_session_meta(
+                self.session_id,
+                json.dumps(self._build_session_runtime_meta()),
+                self.model,
+            )
+        except Exception:
+            logger.debug("Failed to persist runtime session metadata", exc_info=True)
+
     def _ensure_db_session(self) -> None:
         """Create session DB row on first use. Disables _session_db on failure."""
         if self._session_db_created or not self._session_db:
             return
         source = self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli")
+        initial_runtime_meta = self._credential_runtime_meta()
+        if initial_runtime_meta:
+            self._runtime_session_meta = {
+                **getattr(self, "_runtime_session_meta", {}),
+                **initial_runtime_meta,
+            }
         try:
             self._session_db.create_session(
                 session_id=self.session_id,
                 source=source,
                 model=self.model,
-                model_config=self._session_init_model_config,
+                model_config=self._build_session_runtime_meta(),
                 system_prompt=self._cached_system_prompt,
                 user_id=None,
                 parent_session_id=self._parent_session_id,
@@ -4016,6 +4077,10 @@ class AIAgent:
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
+        self._runtime_session_meta = {
+            **getattr(self, "_runtime_session_meta", {}),
+            **self._credential_runtime_meta(entry),
+        }
 
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, _is_oauth_token
@@ -4034,6 +4099,7 @@ class AIAgent:
             self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
             self.api_key = runtime_key
             self.base_url = runtime_base
+            self._persist_runtime_session_meta()
             return
 
         self.api_key = runtime_key
@@ -4042,6 +4108,7 @@ class AIAgent:
         self._client_kwargs["base_url"] = self.base_url
         self._apply_client_headers_for_base_url(self.base_url)
         self._replace_primary_openai_client(reason="credential_rotation")
+        self._persist_runtime_session_meta()
 
     def _recover_with_credential_pool(
         self,

@@ -215,3 +215,32 @@ class TestWebSocketHostOriginGuard:
             },
         ):
             pass
+
+    def test_public_url_mode_allows_reverse_proxy_ws_client(self, monkeypatch):
+        """A loopback-bound dashboard published behind a trusted reverse
+        proxy should accept the proxy's non-loopback peer IP as long as the
+        public Host/Origin already match the declared authority."""
+        import hermes_cli.web_server as ws
+
+        class _Peer:
+            def __init__(self, host: str):
+                self.host = host
+
+        class _WS:
+            def __init__(self):
+                self.client = _Peer("100.64.0.10")
+                self.headers = {
+                    "host": "jony-openclaw.tailcc89cc.ts.net",
+                    "origin": "https://jony-openclaw.tailcc89cc.ts.net",
+                }
+
+        monkeypatch.setattr(ws.app.state, "bound_host", "127.0.0.1", raising=False)
+        monkeypatch.setattr(
+            ws.app.state,
+            "public_host",
+            "jony-openclaw.tailcc89cc.ts.net",
+            raising=False,
+        )
+        monkeypatch.setattr(ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        assert ws._ws_request_is_allowed(_WS())

@@ -540,6 +540,10 @@ class GatewayConfig:
     # STT settings
     stt_enabled: bool = True  # Whether to auto-transcribe inbound voice messages
 
+    # Telegram voice-reply policy
+    voice_reply_max_seconds: int = 30  # Voice replies are only used for short Telegram voice-note answers
+    voice_reply_max_words: int = 80  # Backward-compatible fallback for older configs
+
     # Session isolation in shared chats
     group_sessions_per_user: bool = True  # Isolate group/channel sessions per participant when user IDs are available
     thread_sessions_per_user: bool = False  # When False (default), threads are shared across all participants
@@ -654,6 +658,8 @@ class GatewayConfig:
             "always_log_local": self.always_log_local,
             "filter_silence_narration": self.filter_silence_narration,
             "stt_enabled": self.stt_enabled,
+            "voice_reply_max_seconds": self.voice_reply_max_seconds,
+            "voice_reply_max_words": self.voice_reply_max_words,
             "group_sessions_per_user": self.group_sessions_per_user,
             "thread_sessions_per_user": self.thread_sessions_per_user,
             "max_concurrent_sessions": self.max_concurrent_sessions,
@@ -701,6 +707,18 @@ class GatewayConfig:
         if stt_enabled is None:
             stt_enabled = data.get("stt", {}).get("enabled") if isinstance(data.get("stt"), dict) else None
 
+        voice_reply_max_seconds = data.get("voice_reply_max_seconds")
+        if voice_reply_max_seconds is None:
+            voice_cfg = data.get("voice")
+            if isinstance(voice_cfg, dict):
+                voice_reply_max_seconds = voice_cfg.get("reply_max_seconds")
+
+        voice_reply_max_words = data.get("voice_reply_max_words")
+        if voice_reply_max_words is None:
+            voice_cfg = data.get("voice")
+            if isinstance(voice_cfg, dict):
+                voice_reply_max_words = voice_cfg.get("reply_max_words")
+
         group_sessions_per_user = data.get("group_sessions_per_user")
         thread_sessions_per_user = data.get("thread_sessions_per_user")
         multiplex_profiles = data.get("multiplex_profiles")
@@ -743,6 +761,8 @@ class GatewayConfig:
                 data.get("filter_silence_narration"), True
             ),
             stt_enabled=_coerce_bool(stt_enabled, True),
+            voice_reply_max_seconds=max(_coerce_int(voice_reply_max_seconds, 30), 1),
+            voice_reply_max_words=max(_coerce_int(voice_reply_max_words, 80), 1),
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
@@ -838,6 +858,16 @@ def load_gateway_config() -> GatewayConfig:
             stt_cfg = yaml_cfg.get("stt")
             if isinstance(stt_cfg, dict):
                 gw_data["stt"] = stt_cfg
+
+            voice_cfg = yaml_cfg.get("voice")
+            if isinstance(voice_cfg, dict) and "reply_max_words" in voice_cfg:
+                gw_data["voice_reply_max_words"] = voice_cfg["reply_max_words"]
+            if isinstance(voice_cfg, dict) and "reply_max_seconds" in voice_cfg:
+                gw_data["voice_reply_max_seconds"] = voice_cfg["reply_max_seconds"]
+            elif "voice_reply_max_words" in yaml_cfg:
+                gw_data["voice_reply_max_words"] = yaml_cfg["voice_reply_max_words"]
+            elif "voice_reply_max_seconds" in yaml_cfg:
+                gw_data["voice_reply_max_seconds"] = yaml_cfg["voice_reply_max_seconds"]
 
             if "group_sessions_per_user" in yaml_cfg:
                 gw_data["group_sessions_per_user"] = yaml_cfg["group_sessions_per_user"]

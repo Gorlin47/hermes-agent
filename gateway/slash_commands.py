@@ -1900,6 +1900,10 @@ class GatewaySlashCommandsMixin:
             return t("gateway.voice.tts_enabled")
         elif args in {"channel", "join"}:
             return await self._handle_voice_channel_join(event)
+        elif args == "realtime":
+            return await self._handle_voice_realtime_join(event)
+        elif args == "join realtime":
+            return "Unsupported voice command: use `/voice realtime` for realtime mode, or `/voice join` for normal turn-based voice."
         elif args == "leave":
             return await self._handle_voice_channel_leave(event)
         elif args == "status":
@@ -1908,6 +1912,7 @@ class GatewaySlashCommandsMixin:
                 "off": t("gateway.voice.label_off"),
                 "voice_only": t("gateway.voice.label_voice_only"),
                 "all": t("gateway.voice.label_all"),
+                "realtime": "realtime",
             }
             # Append voice channel info if connected
             adapter = self.adapters.get(event.source.platform)
@@ -1920,11 +1925,18 @@ class GatewaySlashCommandsMixin:
                         t("gateway.voice.status_channel", channel=info['channel_name']),
                         t("gateway.voice.status_participants", count=info['member_count']),
                     ]
+                    if mode == "realtime":
+                        lines.append("Realtime tools: reminders, web_search, image_generation")
+                        lines.append("Barge-in: deferred")
                     for m in info["members"]:
                         status = t("gateway.voice.speaking") if m.get("is_speaking") else ""
                         lines.append(t("gateway.voice.status_member", name=m['display_name'], status=status))
                     return "\n".join(lines)
-            return t("gateway.voice.status_mode", label=labels.get(mode, mode))
+            lines = [t("gateway.voice.status_mode", label=labels.get(mode, mode))]
+            if mode == "realtime":
+                lines.append("Realtime tools: reminders, web_search, image_generation")
+                lines.append("Barge-in: deferred")
+            return "\n".join(lines)
         else:
             # Toggle: off → on, on/all → off
             current = self._voice_mode.get(voice_key, "off")
@@ -2326,6 +2338,39 @@ class GatewaySlashCommandsMixin:
         if _save_config_key("agent.service_tier", saved_value):
             return t("gateway.fast.saved", label=label)
         return t("gateway.fast.session_only", label=label)
+
+    async def _handle_jarvis_command(self, event: MessageEvent, session_key: str) -> str | None:
+        """Handle /jarvis — force direct processing in the current gateway session."""
+        from hermes_cli.jarvis_policy import (
+            format_jarvis_policy_lines,
+            format_jarvis_status_lines,
+        )
+
+        raw = (event.text or "").strip()
+        parts = raw.split(None, 1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        lower = arg.lower()
+
+        if not arg or lower == "status":
+            return "\n".join(format_jarvis_status_lines(self._jarvis_direct_mode_enabled(session_key)))
+
+        if lower in {"policy", "map", "workers", "routing"}:
+            return "\n".join(format_jarvis_policy_lines())
+
+        if lower in {"on", "enable", "enabled"}:
+            self._set_jarvis_direct_mode(session_key, True)
+            return "Jarvis direct mode enabled for this session. Delegation is disabled until /jarvis off."
+
+        if lower in {"off", "disable", "disabled"}:
+            self._set_jarvis_direct_mode(session_key, False)
+            return "Jarvis direct mode disabled for this session. Normal delegation resumes on the next turn."
+
+        self._set_jarvis_direct_mode(session_key, True)
+        try:
+            event.text = arg
+        except Exception:
+            pass
+        return None
 
     async def _handle_yolo_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /yolo — toggle dangerous command approval bypass for this session only."""

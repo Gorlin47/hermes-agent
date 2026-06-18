@@ -1,21 +1,28 @@
 from datetime import datetime, timezone
 
+import httpx
+
 from agent.account_usage import (
     AccountUsageSnapshot,
     AccountUsageWindow,
+    _candidate_codex_usage_urls,
     fetch_account_usage,
     render_account_usage_lines,
 )
 
 
 class _Response:
-    def __init__(self, payload, status_code=200):
-        self._payload = payload
+    def __init__(self, url, payload=None, status_code=200):
+        self._payload = payload or {}
         self.status_code = status_code
+        self.request = httpx.Request("GET", url)
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
+            response = httpx.Response(self.status_code, request=self.request)
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}", request=self.request, response=response
+            )
 
     def json(self):
         return self._payload
@@ -32,7 +39,7 @@ class _Client:
         return False
 
     def get(self, url, headers=None):
-        return _Response(self._payload)
+        return _Response(url, self._payload)
 
 
 class _RoutingClient:
@@ -46,7 +53,51 @@ class _RoutingClient:
         return False
 
     def get(self, url, headers=None):
-        return _Response(self._payloads[url])
+        payload = self._payloads[url]
+        if isinstance(payload, tuple):
+            status_code, body = payload
+        else:
+            status_code, body = 200, payload
+        return _Response(url, body, status_code)
+
+
+def test_fetch_account_usage_codex_falls_back_from_404(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_codex_runtime_credentials",
+        lambda refresh_if_expiring=True: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "access-token",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.account_usage._read_codex_tokens",
+        lambda: {"tokens": {"account_id": "acct_123"}},
+    )
+
+    candidates = _candidate_codex_usage_urls("https://chatgpt.com/backend-api/codex")
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _RoutingClient(
+            {
+                candidates[0]: (404, {}),
+                candidates[1]: {
+                    "plan_type": "pro",
+                    "rate_limit": {
+                        "primary_window": {"used_percent": 2, "reset_at": 1_900_000_000},
+                        "secondary_window": {"used_percent": 7, "reset_at": 1_900_500_000},
+                    },
+                },
+            }
+        ),
+    )
+
+    snapshot = fetch_account_usage("openai-codex")
+
+    assert snapshot is not None
+    assert snapshot.plan == "Pro"
+    assert snapshot.windows[0].used_percent == 2.0
+    assert snapshot.windows[1].used_percent == 7.0
 
 
 def test_fetch_account_usage_codex(monkeypatch):

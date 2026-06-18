@@ -442,6 +442,12 @@ class SessionManager:
             session_meta["base_url"] = base_url.strip()
         if isinstance(api_mode, str) and api_mode.strip():
             session_meta["api_mode"] = api_mode.strip()
+        runtime_meta = getattr(state.agent, "_runtime_session_meta", None)
+        if isinstance(runtime_meta, dict):
+            session_meta.update({
+                k: v for k, v in runtime_meta.items()
+                if v is not None and v != ""
+            })
         cwd_json = json.dumps(session_meta)
 
         try:
@@ -494,6 +500,7 @@ class SessionManager:
         requested_provider = row.get("billing_provider")
         restored_base_url = row.get("billing_base_url")
         restored_api_mode = None
+        restored_runtime_meta = {}
         mc = row.get("model_config")
         if mc:
             try:
@@ -503,6 +510,16 @@ class SessionManager:
                     requested_provider = meta.get("provider") or requested_provider
                     restored_base_url = meta.get("base_url") or restored_base_url
                     restored_api_mode = meta.get("api_mode") or restored_api_mode
+                    restored_runtime_meta = {
+                        key: meta.get(key)
+                        for key in (
+                            "active_credential_id",
+                            "active_credential_label",
+                            "active_credential_source",
+                            "credential_observed_at",
+                        )
+                        if meta.get(key) not in (None, "")
+                    }
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -524,6 +541,11 @@ class SessionManager:
                 base_url=restored_base_url,
                 api_mode=restored_api_mode,
             )
+            if restored_runtime_meta:
+                agent._runtime_session_meta = {
+                    **getattr(agent, "_runtime_session_meta", {}),
+                    **restored_runtime_meta,
+                }
         except Exception:
             logger.warning("Failed to recreate agent for ACP session %s", session_id, exc_info=True)
             return None

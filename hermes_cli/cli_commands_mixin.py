@@ -2208,6 +2208,87 @@ class CLICommandsMixin:
         else:
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (session only){_RST}")
 
+    def _handle_jarvis_command(self, cmd: str):
+        """Handle /jarvis — force direct processing by the main agent.
+
+        Forms:
+            /jarvis                 show current direct-mode status
+            /jarvis status          show current direct-mode status
+            /jarvis policy|map      show the worker routing map and escalation rules
+            /jarvis on|enable       enable direct mode (disables delegation)
+            /jarvis off|disable     restore the previous delegation toolset state
+            /jarvis <prompt>        enable direct mode and queue <prompt> immediately
+        """
+        from cli import _ACCENT, _DIM, _RST, _cprint  # type: ignore[reportMissingImports]
+        from hermes_cli.jarvis_policy import (
+            format_jarvis_policy_lines,
+            format_jarvis_status_lines,
+        )
+
+        parts = (cmd or "").strip().split(None, 1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        lower = arg.lower()
+
+        def _apply_direct_mode(enabled: bool) -> None:
+            agent = getattr(self, "agent", None)
+            if enabled:
+                if not getattr(self, "jarvis_direct_mode", False):
+                    setattr(self, "_jarvis_prev_disabled_toolsets", list(
+                        getattr(agent, "disabled_toolsets", None) or []
+                    ))
+                setattr(self, "jarvis_direct_mode", True)
+                if agent is not None:
+                    current = list(getattr(agent, "disabled_toolsets", None) or [])
+                    if "delegation" not in current:
+                        current.append("delegation")
+                    agent.disabled_toolsets = current
+            else:
+                setattr(self, "jarvis_direct_mode", False)
+                prev = getattr(self, "_jarvis_prev_disabled_toolsets", None)
+                if agent is not None:
+                    if prev is not None:
+                        agent.disabled_toolsets = list(prev)
+                    else:
+                        current = list(getattr(agent, "disabled_toolsets", None) or [])
+                        agent.disabled_toolsets = [ts for ts in current if ts != "delegation"]
+
+        if not arg or lower == "status":
+            for idx, line in enumerate(format_jarvis_status_lines(getattr(self, "jarvis_direct_mode", False))):
+                prefix = _ACCENT if idx == 0 else _DIM
+                _cprint(f"  {prefix}{line}{_RST}")
+            return
+
+        if lower in {"policy", "map", "workers", "routing"}:
+            _cprint(f"  {_ACCENT}Jarvis routing policy{_RST}")
+            for line in format_jarvis_policy_lines():
+                _cprint(f"  {_DIM}{line}{_RST}")
+            return
+
+        if lower in {"on", "enable", "enabled"}:
+            _apply_direct_mode(True)
+            _cprint(f"  {_ACCENT}✓ Jarvis direct mode enabled (session only){_RST}")
+            _cprint(f"  {_DIM}Delegation toolset disabled for this session.{_RST}")
+            return
+
+        if lower in {"off", "disable", "disabled"}:
+            _apply_direct_mode(False)
+            _cprint(f"  {_ACCENT}✓ Jarvis direct mode disabled (session only){_RST}")
+            _cprint(f"  {_DIM}Previous delegation state restored where possible.{_RST}")
+            return
+
+        # Treat everything else as a direct-mode prompt. Enable the mode,
+        # then kick the prompt back into the input queue so the main agent
+        # processes it itself on the next turn.
+        _apply_direct_mode(True)
+        pending = getattr(self, "_pending_input", None)
+        if pending is not None:
+            try:
+                pending.put(arg)
+            except Exception:
+                pass
+        _cprint(f"  {_ACCENT}✓ Jarvis direct mode enabled; prompt queued for direct processing{_RST}")
+        _cprint(f"  {_DIM}{arg[:120]}{'...' if len(arg) > 120 else ''}{_RST}")
+
     def _handle_debug_command(self):
         """Handle /debug — upload debug report + logs and print paste URLs."""
         from hermes_cli.debug import run_debug_share
