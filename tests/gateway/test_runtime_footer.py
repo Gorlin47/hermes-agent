@@ -62,12 +62,15 @@ def test_format_footer_all_fields(monkeypatch, tmp_path):
     (tmp_path / "projects" / "hermes").mkdir(parents=True)
     out = format_runtime_footer(
         model="openrouter/openai/gpt-5.4",
+        provider="openrouter",
+        runtime_mode="fallback",
+        credential_label="Codex · Alazne",
         context_tokens=68000,
         context_length=100000,
         cwd=None,  # falls back to TERMINAL_CWD env var
-        fields=("model", "context_pct", "cwd"),
+        fields=("runtime_mode", "provider", "model", "credential_label", "context_pct", "cwd"),
     )
-    assert out == "gpt-5.4 · 68% · ~/projects/hermes"
+    assert out == "FALLBACK · openrouter · gpt-5.4 · Codex · Alazne · 68% · ~/projects/hermes"
 
 
 def test_format_footer_skips_missing_context_length():
@@ -140,11 +143,40 @@ def test_format_footer_custom_field_order():
 def test_format_footer_unknown_field_silently_ignored():
     out = format_runtime_footer(
         model="openai/gpt-5.4",
+        provider="openai-codex",
+        runtime_mode="primary",
         context_tokens=50, context_length=100,
         cwd="/x",
-        fields=("model", "bogus", "context_pct"),
+        fields=("runtime_mode", "provider", "model", "bogus", "context_pct"),
     )
-    assert out == "gpt-5.4 · 50%"
+    assert out == "PRIMARY · openai-codex · gpt-5.4 · 50%"
+
+
+def test_build_footer_line_honors_runtime_fields():
+    user = {
+        "display": {
+            "platforms": {
+                "cli": {
+                    "runtime_footer": {
+                        "enabled": True,
+                        "fields": ["runtime_mode", "provider", "model", "credential_label"],
+                    }
+                }
+            }
+        }
+    }
+    out = build_footer_line(
+        user_config=user,
+        platform_key="cli",
+        model="openai/gpt-5.4",
+        provider="openai-codex",
+        runtime_mode="primary",
+        credential_label="Codex · Jonatan",
+        context_tokens=0,
+        context_length=None,
+        cwd="",
+    )
+    assert out == "PRIMARY · openai-codex · gpt-5.4 · Codex · Jonatan"
 
 
 # ---------------------------------------------------------------------------

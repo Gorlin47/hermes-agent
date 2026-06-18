@@ -119,6 +119,30 @@ describe('createGatewayEventHandler', () => {
     expect(getTurnState().todos).toEqual(todos)
   })
 
+  it('stores effective runtime metadata from message.complete', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+
+    onEvent({
+      payload: {
+        runtime: {
+          credential_label: 'Jonatan #1',
+          mode: 'fallback',
+          model: 'gpt-5.4-mini',
+          provider: 'openrouter'
+        },
+        text: 'done'
+      },
+      type: 'message.complete'
+    } as any)
+
+    expect(getUiState().runtime).toEqual({
+      credential_label: 'Jonatan #1',
+      mode: 'fallback',
+      model: 'gpt-5.4-mini',
+      provider: 'openrouter'
+    })
+  })
+
   it('prints compaction progress status into the transcript', () => {
     const appended: Msg[] = []
     const ctx = buildCtx(appended)

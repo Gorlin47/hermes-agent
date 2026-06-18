@@ -108,6 +108,27 @@ def _stub_runtime_main():
         yield
 
 
+def test_restores_runtime_before_publishing_runtime_main():
+    agent = _FakeAgent()
+    calls = []
+
+    def fake_restore():
+        agent.model = "gpt-5.4"
+        agent.provider = "openai-codex"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+
+    def fake_set_runtime_main(provider, model, **kwargs):
+        calls.append((provider, model, kwargs["base_url"]))
+
+    with (
+        patch.object(agent, "_restore_primary_runtime", fake_restore),
+        patch("agent.auxiliary_client.set_runtime_main", fake_set_runtime_main),
+    ):
+        _build(agent)
+
+    assert calls == [("openai-codex", "gpt-5.4", "https://chatgpt.com/backend-api/codex")]
+
+
 def _build(agent, **overrides):
     kwargs = dict(
         agent=agent,

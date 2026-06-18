@@ -90,6 +90,12 @@ def build_turn_context(
 
     agent._ensure_db_session()
 
+    # Restore the primary runtime if the previous turn activated fallback.
+    # This must happen before we publish the turn's live runtime to helper
+    # clients, otherwise the UI and auxiliary tools keep seeing the stale
+    # fallback model for one more message.
+    agent._restore_primary_runtime()
+
     # Tell auxiliary_client what the live main provider/model are for this turn.
     try:
         from agent.auxiliary_client import set_runtime_main
@@ -108,9 +114,6 @@ def build_turn_context(
 
     # Bind the skill write-origin ContextVar for this thread.
     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
-
-    # Restore the primary runtime if the previous turn activated fallback.
-    agent._restore_primary_runtime()
 
     # Sanitize surrogate characters from user input.
     if isinstance(user_message, str):

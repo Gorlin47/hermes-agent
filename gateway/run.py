@@ -2351,6 +2351,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+        # Per-session Jarvis direct-mode overrides.
+        # Key: session_key, Value: True when delegation is forced off for that session.
+        self._jarvis_direct_mode_sessions: Dict[str, bool] = {}
         self._kanban_notifier_profile = self._active_profile_name()
         # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
         self._teams_pipeline_runtime = None
@@ -7600,6 +7603,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "fast":
             return await self._handle_fast_command(event)
 
+        if canonical == "jarvis":
+            jarvis_result = await self._handle_jarvis_command(event, session_key)
+            if jarvis_result is not None:
+                return jarvis_result
+
         if canonical == "verbose":
             return await self._handle_verbose_command(event)
 
@@ -9181,6 +9189,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     user_config=_load_gateway_config(),
                     platform_key=_platform_config_key(source.platform),
                     model=agent_result.get("model"),
+                    provider=agent_result.get("provider"),
+                    runtime_mode=agent_result.get("runtime_mode"),
+                    credential_label=agent_result.get("active_credential_label"),
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
@@ -9450,6 +9461,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # still persisted in session history so later turns keep normal
             # user/assistant alternation; only the outbound chat delivery is
             # suppressed.
+            suppress_text_reply = False
             if _intentional_silence:
                 logger.info(
                     "Suppressing intentional silence marker for session %s",
@@ -9461,6 +9473,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _already_sent = bool(agent_result.get("already_sent"))
             if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
                 await self._send_voice_reply(event, response)
+                if event.source.platform == Platform.TELEGRAM and event.message_type == MessageType.VOICE:
+                    suppress_text_reply = True
+                    response = ""
+
+            # Telegram voice-note replies are voice-only when short; long
+            # replies stay text-only.
+            if suppress_text_reply:
+                response = ""
 
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming
@@ -9497,8 +9517,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         logger.debug("trailing footer send failed: %s", _e)
                 return None
 
+            if suppress_text_reply:
+                return None
+
             return response
             
+
         except Exception as e:
             # Stop typing indicator on error too
             try:
@@ -10193,6 +10217,75 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         adapter._voice_input_callback = None
         return "Failed to join voice channel. Check bot permissions (Connect + Speak)."
 
+    async def _handle_voice_realtime_join(self, event: MessageEvent) -> str:
+        """Join the user's Discord voice channel and mark realtime mode.
+
+        Phase 1 wires command/state only. Later phases replace the optional
+        adapter ``start_realtime_voice_session`` hook with the real streaming
+        bridge to OpenAI Realtime.
+        """
+        adapter = self.adapters.get(event.source.platform)
+        if not hasattr(adapter, "join_voice_channel"):
+            return "Realtime voice is only supported on Discord voice channels."
+
+        guild_id = self._get_guild_id(event)
+        if not guild_id:
+            return "This command only works in a Discord server."
+
+        voice_channel = await adapter.get_user_voice_channel(
+            guild_id, event.source.user_id
+        )
+        if not voice_channel:
+            return "You need to be in a voice channel first."
+
+        if hasattr(adapter, "_voice_input_callback"):
+            adapter._voice_input_callback = None
+        if hasattr(adapter, "_on_voice_disconnect"):
+            adapter._on_voice_disconnect = self._handle_voice_timeout_cleanup
+
+        try:
+            success = await adapter.join_voice_channel(voice_channel)
+        except Exception as e:
+            logger.warning("Failed to join realtime voice channel: %s", e)
+            return f"Failed to join realtime voice channel: {e}"
+
+        if not success:
+            return "Failed to join voice channel. Check bot permissions (Connect + Speak)."
+
+        adapter._voice_text_channels[guild_id] = int(event.source.chat_id)
+        if hasattr(adapter, "_voice_sources"):
+            adapter._voice_sources[guild_id] = event.source.to_dict()
+
+        if hasattr(adapter, "start_realtime_voice_session"):
+            try:
+                starter = adapter.start_realtime_voice_session(
+                    guild_id=guild_id,
+                    voice_channel=voice_channel,
+                    source=event.source,
+                )
+                if inspect.isawaitable(starter):
+                    await starter
+            except Exception as e:
+                logger.warning("Failed to start realtime voice session: %s", e)
+                try:
+                    await adapter.leave_voice_channel(guild_id)
+                except Exception:
+                    logger.debug("Failed to leave voice channel after realtime startup failure", exc_info=True)
+                return (
+                    "Could not start realtime voice. The bot joined the channel, "
+                    f"but realtime audio failed to initialize: {e}. "
+                    "Please try again, or use /voice join for turn-based voice."
+                )
+
+        self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "realtime"
+        self._save_voice_modes()
+        self._set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True)
+        return (
+            f"Realtime voice active in **{voice_channel.name}**.\n"
+            "You can speak naturally. Use /voice leave to disconnect.\n"
+            "Tools: reminders, web_search, image_generation. Barge-in: deferred."
+        )
+
     async def _handle_voice_channel_leave(self, event: MessageEvent) -> str:
         """Leave the Discord voice channel."""
         adapter = self.adapters.get(event.source.platform)
@@ -10205,6 +10298,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return "Not in a voice channel."
 
         try:
+            if self._voice_mode.get(self._voice_key(event.source.platform, event.source.chat_id)) == "realtime":
+                stopper = getattr(adapter, "stop_realtime_voice_session", None)
+                if stopper is not None:
+                    stopped = stopper(guild_id)
+                    if inspect.isawaitable(stopped):
+                        await stopped
             await adapter.leave_voice_channel(guild_id)
         except Exception as e:
             logger.warning("Error leaving voice channel: %s", e)
@@ -10335,6 +10434,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         await adapter.handle_message(event)
 
+    def _voice_reply_time_limit_seconds(self) -> int:
+        """Return the Telegram voice-reply length threshold in seconds."""
+        try:
+            return max(int(getattr(self.config, "voice_reply_max_seconds", 30)), 1)
+        except Exception:
+            return 30
+
+    def _estimated_speech_duration_seconds(self, text: str) -> float:
+        """Estimate TTS duration from text length.
+
+        Uses a conservative conversational speech rate of ~150 words/minute,
+        which is roughly 2.5 words/second.
+        """
+        try:
+            from tools.tts_tool import _strip_markdown_for_tts
+            clean = _strip_markdown_for_tts(text[:4000])
+        except Exception:
+            clean = text
+
+        words = len(clean.split())
+        return words / 2.5
+
     def _should_send_voice_reply(
         self,
         event: MessageEvent,
@@ -10352,6 +10473,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
           UNLESS streaming already consumed the response (already_sent=True),
           in which case the base adapter won't have text for auto-TTS so the
           runner must handle it.
+        - Telegram voice-note replies exceed the configured short-answer limit
+          and should stay text-only.
         """
         if not response or response.startswith("Error:"):
             return False
@@ -10366,6 +10489,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         if not should:
             return False
+
+        # Telegram: short answers for voice notes can be sent back as audio,
+        # but long answers should remain text-only so the user does not get a
+        # novella with a soundtrack.
+        if event.source.platform == Platform.TELEGRAM and is_voice_input and voice_mode == "voice_only":
+            estimated_seconds = self._estimated_speech_duration_seconds(response)
+            if estimated_seconds <= 0:
+                return False
+            return estimated_seconds <= self._voice_reply_time_limit_seconds()
 
         # Dedup: agent already called TTS tool
         has_agent_tts = any(
@@ -10629,7 +10761,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from hermes_cli.tools_config import _get_platform_tools
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
             agent_cfg = user_config.get("agent") or {}
-            disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
+            disabled_toolsets = self._resolve_session_disabled_toolsets(agent_cfg, session_key)
 
             pr = self._provider_routing
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
@@ -12871,6 +13003,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         cache_keys: dict | None = None,
         user_id: str | None = None,
         user_id_alt: str | None = None,
+        jarvis_direct_mode: bool = False,
     ) -> str:
         """Compute a stable string key from agent config values.
 
@@ -12924,6 +13057,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _cache_keys_sorted,
                 str(user_id or ""),
                 str(user_id_alt or ""),
+                str(bool(jarvis_direct_mode)),
             ],
             sort_keys=True,
             default=str,
@@ -12950,6 +13084,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if val is not None:
                 runtime_kwargs[key] = val
         return model, runtime_kwargs
+
+    def _jarvis_direct_mode_enabled(self, session_key: str) -> bool:
+        """Return True when the current session is in /jarvis direct mode."""
+        return bool(getattr(self, "_jarvis_direct_mode_sessions", {}).get(session_key))
+
+    def _set_jarvis_direct_mode(self, session_key: str, enabled: bool) -> None:
+        """Toggle /jarvis direct mode for a session."""
+        store = getattr(self, "_jarvis_direct_mode_sessions", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._jarvis_direct_mode_sessions = store
+        if enabled:
+            store[session_key] = True
+        else:
+            store.pop(session_key, None)
+
+    def _resolve_session_disabled_toolsets(
+        self,
+        agent_cfg: dict,
+        session_key: str,
+    ) -> list[str] | None:
+        """Return disabled toolsets, including /jarvis delegation suppression."""
+        disabled = [str(ts) for ts in (agent_cfg.get("disabled_toolsets") or [])]
+        if self._jarvis_direct_mode_enabled(session_key) and "delegation" not in disabled:
+            disabled.append("delegation")
+        disabled = sorted({ts for ts in disabled if ts})
+        return disabled or None
 
     def _is_intentional_model_switch(self, session_key: str, agent_model: str) -> bool:
         """Return True if *agent_model* matches an active /model session override."""
@@ -13779,7 +13940,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
         agent_cfg_local = user_config.get("agent") or {}
-        disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
+        disabled_toolsets = self._resolve_session_disabled_toolsets(agent_cfg_local, session_key)
 
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):
@@ -14744,6 +14905,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 cache_keys=self._extract_cache_busting_config(user_config),
                 user_id=getattr(source, "user_id", None),
                 user_id_alt=getattr(source, "user_id_alt", None),
+                jarvis_direct_mode=self._jarvis_direct_mode_enabled(session_key),
             )
             agent = None
             _cache_lock = getattr(self, "_agent_cache_lock", None)

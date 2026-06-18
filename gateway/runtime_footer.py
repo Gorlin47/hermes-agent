@@ -53,6 +53,23 @@ def _model_short(model: Optional[str]) -> str:
     return model.rsplit("/", 1)[-1]
 
 
+def _provider_short(provider: Optional[str]) -> str:
+    if not provider:
+        return ""
+    return str(provider).strip()
+
+
+def _runtime_mode_label(runtime_mode: Optional[str]) -> str:
+    mode = (runtime_mode or "").strip().lower()
+    if mode == "fallback":
+        return "FALLBACK"
+    if mode == "primary":
+        return "PRIMARY"
+    if mode == "restored":
+        return "RESTORED"
+    return ""
+
+
 def resolve_footer_config(
     user_config: dict[str, Any] | None,
     platform_key: str | None = None,
@@ -91,6 +108,9 @@ def resolve_footer_config(
 def format_runtime_footer(
     *,
     model: Optional[str],
+    provider: Optional[str] = None,
+    runtime_mode: Optional[str] = None,
+    credential_label: Optional[str] = None,
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
@@ -103,10 +123,22 @@ def format_runtime_footer(
     """
     parts: list[str] = []
     for field in fields:
-        if field == "model":
+        if field == "runtime_mode":
+            mode = _runtime_mode_label(runtime_mode)
+            if mode:
+                parts.append(mode)
+        elif field == "provider":
+            p = _provider_short(provider)
+            if p:
+                parts.append(p)
+        elif field == "model":
             m = _model_short(model)
             if m:
                 parts.append(m)
+        elif field == "credential_label":
+            label = str(credential_label or "").strip()
+            if label:
+                parts.append(label)
         elif field == "context_pct":
             if context_length and context_length > 0 and context_tokens >= 0:
                 pct = max(0, min(100, round((context_tokens / context_length) * 100)))
@@ -127,6 +159,9 @@ def build_footer_line(
     user_config: dict[str, Any] | None,
     platform_key: str | None,
     model: Optional[str],
+    provider: Optional[str] = None,
+    runtime_mode: Optional[str] = None,
+    credential_label: Optional[str] = None,
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
@@ -142,6 +177,9 @@ def build_footer_line(
         return ""
     return format_runtime_footer(
         model=model,
+        provider=provider,
+        runtime_mode=runtime_mode,
+        credential_label=credential_label,
         context_tokens=context_tokens,
         context_length=context_length,
         cwd=cwd,

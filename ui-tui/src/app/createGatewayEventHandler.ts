@@ -895,6 +895,10 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           patchUiState(state => ({ ...state, usage: { ...state.usage, ...ev.payload!.usage } }))
         }
 
+        if (ev.payload?.runtime) {
+          patchUiState({ runtime: { ...ev.payload.runtime } })
+        }
+
         return
       }
 

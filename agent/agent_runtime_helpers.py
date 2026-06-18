@@ -973,6 +973,84 @@ def drop_thinking_only_and_merge_users(
 
 
 
+def _reconcile_primary_runtime_with_live_pool(agent, rt: Dict[str, Any]) -> Dict[str, Any]:
+    """Best-effort refresh of the saved primary runtime from the live pool.
+
+    ``_primary_runtime`` is a snapshot, but a long-lived session can stay
+    alive across credential rotations.  Before restoring the primary for a
+    new turn, reconcile the credential-bearing fields against the current
+    pool state so a recovered account is picked up on the very next message.
+    """
+    provider = str(rt.get("provider") or getattr(agent, "provider", "") or "").strip()
+    if not provider:
+        return rt
+
+    try:
+        from agent.credential_pool import load_pool
+
+        pool = load_pool(provider)
+    except Exception as exc:
+        logger.debug("Could not load credential pool for %s while restoring primary: %s", provider, exc)
+        return rt
+
+    if not pool or not pool.has_credentials():
+        return rt
+
+    try:
+        entry = pool.peek()
+    except Exception as exc:
+        logger.debug("Could not peek credential pool for %s while restoring primary: %s", provider, exc)
+        return rt
+
+    if entry is None:
+        return rt
+
+    resolved_api_key = (
+        getattr(entry, "runtime_api_key", "")
+        or getattr(entry, "access_token", "")
+        or rt.get("api_key", "")
+        or ""
+    )
+    resolved_base_url = (
+        getattr(entry, "runtime_base_url", None)
+        or getattr(entry, "base_url", None)
+        or rt.get("base_url", "")
+        or ""
+    )
+    resolved_api_key = str(resolved_api_key).strip()
+    resolved_base_url = str(resolved_base_url).strip()
+
+    reconciled = copy.deepcopy(rt)
+    client_kwargs = dict(reconciled.get("client_kwargs") or {})
+
+    changed = False
+    if resolved_api_key and resolved_api_key != reconciled.get("api_key", ""):
+        reconciled["api_key"] = resolved_api_key
+        client_kwargs["api_key"] = resolved_api_key
+        changed = True
+    if resolved_base_url and resolved_base_url != reconciled.get("base_url", ""):
+        reconciled["base_url"] = resolved_base_url
+        client_kwargs["base_url"] = resolved_base_url
+        changed = True
+
+    if reconciled.get("api_mode") == "anthropic_messages":
+        if resolved_api_key and resolved_api_key != reconciled.get("anthropic_api_key", ""):
+            reconciled["anthropic_api_key"] = resolved_api_key
+            changed = True
+        if resolved_base_url and resolved_base_url != reconciled.get("anthropic_base_url", ""):
+            reconciled["anthropic_base_url"] = resolved_base_url
+            changed = True
+
+    if changed:
+        reconciled["client_kwargs"] = client_kwargs
+        logger.info(
+            "Primary runtime reconciled from live pool: provider=%s credential=%s",
+            provider,
+            getattr(entry, "label", None) or getattr(entry, "id", "") or "unknown",
+        )
+    return reconciled
+
+
 def restore_primary_runtime(agent) -> bool:
     """Restore the primary runtime at the start of a new turn.
 
@@ -998,7 +1076,8 @@ def restore_primary_runtime(agent) -> bool:
     if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
         return False  # primary still in rate-limit cooldown, stay on fallback
 
-    rt = agent._primary_runtime
+    rt = copy.deepcopy(agent._primary_runtime)
+    rt = _reconcile_primary_runtime_with_live_pool(agent, rt)
     try:
         # ── Core runtime state ──
         agent.model = rt["model"]
@@ -1046,6 +1125,11 @@ def restore_primary_runtime(agent) -> bool:
             api_mode=rt.get("compressor_api_mode", ""),
         )
 
+        # Keep the saved snapshot aligned with the live pool so the next
+        # turn starts from fresh credential-bearing state without needing
+        # a second reconciliation path.
+        agent._primary_runtime = copy.deepcopy(rt)
+
         # ── Reset fallback chain for the new turn ──
         agent._fallback_activated = False
         agent._fallback_index = 0
@@ -1056,7 +1140,7 @@ def restore_primary_runtime(agent) -> bool:
         )
         return True
     except Exception as e:
-        logger.warning("Failed to restore primary runtime: %s", e)
+        logger.warning("Could not restore primary runtime: %s", e)
         return False
 
 # Which error types indicate a transient transport failure worth
