@@ -284,6 +284,7 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     Accepts:
     - Exact bound host (with or without port suffix)
     - Loopback aliases when bound to loopback
+    - The operator-declared dashboard public URL host (reverse-proxy case)
     - Any host when bound to 0.0.0.0 (explicit opt-in to non-loopback,
       no protection possible at this layer)
     """
@@ -307,10 +308,24 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
         host_only = h.rsplit(":", 1)[0] if ":" in h else h
     host_only = host_only.lower()
 
+    trusted_public_host = ""
+    try:
+        from hermes_cli.dashboard_auth.prefix import resolve_public_url
+
+        public_url = resolve_public_url()
+        if public_url:
+            parsed_public = urllib.parse.urlparse(public_url)
+            trusted_public_host = (parsed_public.hostname or "").lower()
+    except Exception:
+        trusted_public_host = ""
+
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
     # defence can protect that mode; rely on operator network controls.
     if bound_host in {"0.0.0.0", "::"}:
+        return True
+
+    if trusted_public_host and host_only == trusted_public_host:
         return True
 
     # Loopback bind: accept the loopback names
