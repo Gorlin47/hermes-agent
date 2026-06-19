@@ -373,8 +373,8 @@ def _is_accepted_host(host_header: str, bound_host: str, public_host: str = "") 
     Accepts:
     - Exact bound host (with or without port suffix)
     - Loopback aliases when bound to loopback
-    - The configured trusted public host when serving behind a reverse
-      proxy and ``dashboard.public_url`` is set
+    - The operator-declared dashboard public URL host when serving behind a
+      trusted reverse proxy (for example Tailscale Serve)
     - Any host when bound to 0.0.0.0 (explicit opt-in to non-loopback,
       no protection possible at this layer)
     """
@@ -398,24 +398,31 @@ def _is_accepted_host(host_header: str, bound_host: str, public_host: str = "") 
         host_only = h.rsplit(":", 1)[0] if ":" in h else h
     host_only = host_only.lower()
 
+    trusted_public_host = (public_host or "").strip().lower()
+    if not trusted_public_host:
+        try:
+            trusted_public_host = _resolve_dashboard_public_host()
+        except Exception:
+            trusted_public_host = ""
+
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
     # defence can protect that mode; rely on operator network controls.
     if bound_host in {"0.0.0.0", "::"}:
         return True
 
-    # Loopback bind: accept the loopback names and the operator-declared
-    # public host if the dashboard is published behind a trusted proxy.
+    if trusted_public_host and host_only == trusted_public_host:
+        return True
+
+    # Loopback bind: accept the loopback names, plus the trusted public
+    # hostname when the dashboard is published behind a reverse proxy.
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
-        return host_only in _LOOPBACK_HOST_VALUES or (
-            public_host and host_only == public_host
-        )
+        return host_only in _LOOPBACK_HOST_VALUES
 
-    # Explicit non-loopback bind: require exact host match, but still
-    # allow the configured public host if the operator chose to publish
-    # behind a trusted reverse proxy.
-    return host_only == bound_lc or (public_host and host_only == public_host)
+    # Explicit non-loopback bind: require exact host match. The trusted
+    # public host already returned early above.
+    return host_only == bound_lc
 
 
 @app.middleware("http")

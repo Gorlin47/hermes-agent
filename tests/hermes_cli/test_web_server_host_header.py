@@ -83,6 +83,31 @@ class TestHostHeaderValidator:
         assert _is_accepted_host("LOCALHOST", "127.0.0.1")
         assert _is_accepted_host("LocalHost:9119", "127.0.0.1")
 
+    @pytest.mark.parametrize(
+        ("public_url", "host_header", "expected"),
+        [
+            (
+                "https://jony-openclaw.tailcc89cc.ts.net:9119",
+                "jony-openclaw.tailcc89cc.ts.net:9119",
+                True,
+            ),
+            (
+                "https://jony-openclaw.tailcc89cc.ts.net:9119",
+                "evil.example",
+                False,
+            ),
+        ],
+    )
+    def test_public_url_host_is_accepted_for_reverse_proxy(
+        self, monkeypatch, public_url, host_header, expected
+    ):
+        """A loopback-bound dashboard behind a trusted reverse proxy must
+        accept the operator-declared public host."""
+        from hermes_cli.web_server import _is_accepted_host
+
+        monkeypatch.setenv("HERMES_DASHBOARD_PUBLIC_URL", public_url)
+        assert _is_accepted_host(host_header, "127.0.0.1") is expected
+
 
 class TestHostHeaderMiddleware:
     """End-to-end test via the FastAPI app — verify the middleware
@@ -146,6 +171,28 @@ class TestHostHeaderMiddleware:
         resp = client.get("/api/status")
         # Should get through to the status endpoint, not a 400
         assert resp.status_code != 400
+
+    def test_public_url_host_request_accepted(self, monkeypatch):
+        from fastapi.testclient import TestClient
+        from hermes_cli.web_server import app
+
+        monkeypatch.setenv(
+            "HERMES_DASHBOARD_PUBLIC_URL",
+            "https://jony-openclaw.tailcc89cc.ts.net:9119",
+        )
+        app.state.bound_host = "127.0.0.1"
+        try:
+            client = TestClient(app)
+            resp = client.get(
+                "/api/status",
+                headers={"Host": "jony-openclaw.tailcc89cc.ts.net:9119"},
+            )
+            assert resp.status_code != 400 or (
+                "Invalid Host header" not in resp.json().get("detail", "")
+            )
+        finally:
+            if hasattr(app.state, "bound_host"):
+                del app.state.bound_host
 
 
 class TestWebSocketHostOriginGuard:

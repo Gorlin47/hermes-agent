@@ -443,6 +443,17 @@ class TestWsHostOriginGuardOrigins:
         ws = self._ws(origin="http://evil.test", host="127.0.0.1:8080")
         assert web_server._ws_host_origin_is_allowed(ws) is False
 
+    def test_loopback_public_url_host_and_origin_allowed(self, loopback_app, monkeypatch):
+        monkeypatch.setenv(
+            "HERMES_DASHBOARD_PUBLIC_URL",
+            "https://jony-openclaw.tailcc89cc.ts.net:9119",
+        )
+        ws = self._ws(
+            origin="https://jony-openclaw.tailcc89cc.ts.net:9119",
+            host="jony-openclaw.tailcc89cc.ts.net:9119",
+        )
+        assert web_server._ws_host_origin_is_allowed(ws) is True
+
     def test_explicit_non_loopback_file_origin_allowed(self, insecure_explicit_host_app):
         """Packaged Hermes Desktop also uses file:// when connecting to a
         Tailscale/LAN dashboard bind.
