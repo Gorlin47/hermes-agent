@@ -184,12 +184,38 @@ Status:
 
 ---
 
+### 7) Dashboard / Tailscale host-header fix
+- Branch: `jony/dashboard-tailscale-host-header-fix`
+- Commit: `54702b1174afca31b1caf95f5bb86bd0e726efbb`
+- Subject: `fix(dashboard): trust public_url host for tailscale reverse proxy`
+
+Files in this block:
+- `hermes_cli/web_server.py`
+- `tests/hermes_cli/test_dashboard_auth_ws_auth.py`
+- `tests/hermes_cli/test_web_server_host_header.py`
+
+Status:
+- **Independent hotfix branch.**
+- Can be replayed directly from `main` or from a clean update worktree.
+- Intended to preserve the local fix that allows a loopback-bound dashboard behind Tailscale Serve to trust the operator-declared `HERMES_DASHBOARD_PUBLIC_URL` host/origin.
+
+Crossovers to remember:
+- Shares `hermes_cli/web_server.py` with `jony/account-quota-observability`
+- Shares `tests/hermes_cli/test_web_server_host_header.py` with `jony/account-quota-observability`
+
+Verification at creation time:
+- focused pytest passed for the two dashboard auth/host-header test files
+- live `curl` checks returned `200 OK` on published dashboard ports `9119`, `9121`, and `9123` with the Tailscale host header
+
+---
+
 ## Dependency summary
 
 ### Independent branches
 These can be replayed directly from `main` without requiring runtime first:
 - `jony/account-quota-observability`
 - `jony/controlled-update-docs`
+- `jony/dashboard-tailscale-host-header-fix`
 
 ### Runtime-rooted branches
 These should be treated as stacked on the runtime block in practical replay order:
@@ -217,15 +243,16 @@ If a future stable upstream update is worth replaying onto, the safest order is:
 
 1. Replay `jony/runtime-observability`
 2. Replay `jony/account-quota-observability`
-3. Replay whichever runtime-rooted feature branches are still wanted:
+3. Replay `jony/dashboard-tailscale-host-header-fix`
+4. Replay whichever runtime-rooted feature branches are still wanted:
    - `jony/discord-realtime-voice`
    - `jony/jarvis-policy-kanban`
    - `jony/tts-voice-length`
-4. Replay `jony/controlled-update-docs` only if the docs are still useful
+5. Replay `jony/controlled-update-docs` only if the docs are still useful
 
 Rationale:
 - runtime is the most structurally shared block
-- account/quota is independent but overlaps config/router surfaces with later branches
+- account/quota and dashboard-host fix are independent but both overlap web-server/dashboard surfaces
 - Discord/Jarvis/TTS then resolve their smaller crossover points explicitly
 
 ## Coverage check
