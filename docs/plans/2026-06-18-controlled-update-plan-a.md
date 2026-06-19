@@ -60,6 +60,19 @@
 - `tests/test_account_usage.py`
 - `tests/scripts/test_codex_quota_low_watchdog_failover.py`
 
+#### Topic B2 — dashboard / Tailscale host-header hotfix (separate branch, preserve for replay)
+- `hermes_cli/web_server.py`
+- `tests/hermes_cli/test_dashboard_auth_ws_auth.py`
+- `tests/hermes_cli/test_web_server_host_header.py`
+
+Preserved branch created after the initial split plan:
+- branch: `jony/dashboard-tailscale-host-header-fix`
+- commit: `54702b1174afca31b1caf95f5bb86bd0e726efbb`
+- subject: `fix(dashboard): trust public_url host for tailscale reverse proxy`
+
+Replay note:
+- keep this as its own hotfix branch even though it overlaps `hermes_cli/web_server.py` with Topic B; apply it deliberately during update replay after choosing whether Topic B is also wanted.
+
 #### Topic C — Discord realtime / voice work (separate branch, do not mix into continuity)
 - `plugins/platforms/discord/adapter.py`
 - `plugins/platforms/discord/voice_mixer.py`
