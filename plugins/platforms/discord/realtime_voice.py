@@ -37,12 +37,18 @@ def _discord_pcm48_stereo_to_openai_pcm24_mono(pcm: bytes) -> bytes:
     """Convert Discord-native 48 kHz stereo s16le PCM to OpenAI 24 kHz mono."""
     if not pcm:
         return b""
+    frame_aligned = pcm[: len(pcm) - (len(pcm) % 4)]
+    if not frame_aligned:
+        return b""
     try:
         import numpy as np
     except Exception:
-        # Conservative fallback: pass through rather than failing the session.
-        return pcm
-    samples = np.frombuffer(pcm[: len(pcm) - (len(pcm) % 4)], dtype=np.int16)
+        import audioop  # noqa: PLC0415 - stdlib fallback when numpy is absent
+
+        mono48 = audioop.tomono(frame_aligned, 2, 0.5, 0.5)
+        mono24, _ = audioop.ratecv(mono48, 2, 1, 48000, 24000, None)
+        return mono24
+    samples = np.frombuffer(frame_aligned, dtype=np.int16)
     if samples.size < 2:
         return b""
     stereo = samples.reshape(-1, 2).astype(np.int32)
@@ -55,11 +61,23 @@ def _openai_pcm24_mono_to_discord_pcm48_stereo(pcm: bytes) -> bytes:
     """Convert OpenAI 24 kHz mono s16le PCM to Discord 48 kHz stereo."""
     if not pcm:
         return b""
+    frame_aligned = pcm[: len(pcm) - (len(pcm) % 2)]
+    if not frame_aligned:
+        return b""
     try:
         import numpy as np
     except Exception:
-        return pcm
-    mono24 = np.frombuffer(pcm[: len(pcm) - (len(pcm) % 2)], dtype=np.int16)
+        from array import array  # noqa: PLC0415 - stdlib fallback when numpy is absent
+
+        mono24 = array("h")
+        mono24.frombytes(frame_aligned)
+        if not mono24:
+            return b""
+        stereo48 = array("h")
+        for sample in mono24:
+            stereo48.extend((sample, sample, sample, sample))
+        return stereo48.tobytes()
+    mono24 = np.frombuffer(frame_aligned, dtype=np.int16)
     if mono24.size == 0:
         return b""
     mono48 = np.repeat(mono24, 2)
