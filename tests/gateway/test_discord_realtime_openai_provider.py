@@ -14,12 +14,17 @@ from gateway.platforms.base import SessionSource
 
 
 class FakeWebSocket:
-    def __init__(self, incoming=None):
+    def __init__(self, incoming=None, fail_on_send: int | None = None):
         self.sent = []
         self.incoming = list(incoming or [])
         self.closed = False
+        self.fail_on_send = fail_on_send
+        self.send_count = 0
 
     async def send(self, message):
+        self.send_count += 1
+        if self.fail_on_send is not None and self.send_count == self.fail_on_send:
+            raise RuntimeError("simulated send failure")
         self.sent.append(json.loads(message))
 
     async def close(self):
@@ -140,6 +145,31 @@ def test_openai_provider_session_update_exposes_only_safe_realtime_tools():
     assert "terminal" not in names
     assert "files" not in names
     assert ws.sent[0]["session"]["tool_choice"] == "auto"
+
+
+def test_openai_provider_start_closes_websocket_when_session_update_fails():
+    from plugins.platforms.discord.realtime_voice import OpenAIRealtimeProvider
+
+    ws = FakeWebSocket(fail_on_send=1)
+    provider = OpenAIRealtimeProvider(
+        api_key="sk-test",
+        output_stream=FakeStream(),
+        websocket_factory=WebSocketFactory(ws),
+    )
+
+    async def run():
+        try:
+            await provider.start(session=object())
+        except RuntimeError as exc:
+            assert "simulated send failure" in str(exc)
+        else:
+            raise AssertionError("provider.start() should have failed")
+
+    asyncio.run(run())
+
+    assert ws.closed is True
+    assert provider.websocket is None
+    assert provider._receive_task is None
 
 
 def test_realtime_tool_dispatch_rejects_non_allowlisted_tools():

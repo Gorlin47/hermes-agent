@@ -142,23 +142,31 @@ class OpenAIRealtimeProvider:
         self.websocket = await _maybe_await(
             factory(self.uri, additional_headers=headers)
         )
-        await self._send_json(
-            {
-                "type": "session.update",
-                "session": {
-                    "type": "realtime",
-                    "instructions": self.instructions,
-                    "audio": {
-                        "input": {"format": {"type": "audio/pcm", "rate": 24000}},
-                        "output": {"format": {"type": "audio/pcm", "rate": 24000}},
+        try:
+            await self._send_json(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "instructions": self.instructions,
+                        "audio": {
+                            "input": {"format": {"type": "audio/pcm", "rate": 24000}},
+                            "output": {"format": {"type": "audio/pcm", "rate": 24000}},
+                        },
+                        "tools": self._build_tools(),
+                        "tool_choice": "auto",
                     },
-                    "tools": self._build_tools(),
-                    "tool_choice": "auto",
-                },
-            }
-        )
-        self._closed = False
-        self._receive_task = asyncio.create_task(self._receive_loop())
+                }
+            )
+            self._closed = False
+            self._receive_task = asyncio.create_task(self._receive_loop())
+        except Exception:
+            ws = self.websocket
+            self.websocket = None
+            self._receive_task = None
+            if ws is not None and hasattr(ws, "close"):
+                await _maybe_await(ws.close())
+            raise
 
     async def stop(self, reason: str = "") -> None:
         """Close websocket and output stream once."""
