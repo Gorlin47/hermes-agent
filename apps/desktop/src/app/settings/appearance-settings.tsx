@@ -8,6 +8,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { Check, Download, Loader2, Palette, Trash2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
+import { FONT_SCALE_MAX, FONT_SCALE_MIN, $fontScale, setFontScale } from '@/store/font-scale'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
 import { $translucency, setTranslucency } from '@/store/translucency'
 import { useTheme } from '@/themes/context'
@@ -135,6 +136,7 @@ function VscodeThemeInstaller() {
 export function AppearanceSettings() {
   const { t, isSavingLocale } = useI18n()
   const { themeName, mode, availableThemes, setTheme, setMode } = useTheme()
+  const fontScale = useStore($fontScale)
   const toolViewMode = useStore($toolViewMode)
   const translucency = useStore($translucency)
   const profiles = useStore($profiles)
@@ -183,6 +185,32 @@ export function AppearanceSettings() {
             }
             description={a.colorModeDesc}
             title={a.colorMode}
+          />
+
+          <ListRow
+            action={
+              <div className="flex items-center gap-3">
+                <input
+                  aria-label={a.textSizeTitle}
+                  className="h-1 w-40 cursor-pointer appearance-none rounded-full bg-(--ui-stroke-tertiary)"
+                  max={FONT_SCALE_MAX}
+                  min={FONT_SCALE_MIN}
+                  onChange={event => {
+                    triggerHaptic('selection')
+                    setFontScale(Number(event.target.value))
+                  }}
+                  step={5}
+                  style={{ accentColor: 'var(--dt-primary)' }}
+                  type="range"
+                  value={fontScale}
+                />
+                <span className="w-11 text-right text-[length:var(--conversation-caption-font-size)] tabular-nums text-(--ui-text-tertiary)">
+                  {fontScale}%
+                </span>
+              </div>
+            }
+            description={a.textSizeDesc}
+            title={a.textSizeTitle}
           />
 
           <ListRow

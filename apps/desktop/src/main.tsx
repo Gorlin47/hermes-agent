@@ -1,4 +1,6 @@
 import './styles.css'
+// Side-effect: applies the persisted desktop text scale on load.
+import './store/font-scale'
 // Side-effect: applies the persisted window translucency on load.
 import './store/translucency'
 

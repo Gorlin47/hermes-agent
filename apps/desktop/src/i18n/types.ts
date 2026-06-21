@@ -247,6 +247,8 @@ export interface Translations {
       colorModeDesc: string
       toolViewTitle: string
       toolViewDesc: string
+      textSizeTitle: string
+      textSizeDesc: string
       translucencyTitle: string
       translucencyDesc: string
       product: string
