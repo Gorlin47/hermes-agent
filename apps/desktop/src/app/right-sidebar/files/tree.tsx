@@ -1,4 +1,4 @@
-import { type CSSProperties, type Ref, useCallback, useRef, useState } from 'react'
+import { type CSSProperties, useCallback, useRef, useState } from 'react'
 import { type NodeApi, Tree } from 'react-arborist'
 
 import { PageLoader } from '@/components/page-loader'
@@ -116,7 +116,9 @@ export function ProjectTree({
           onToggle={handleToggle}
           openByDefault={false}
           padding={0}
-          ref={treeRef as unknown as Ref<unknown>}
+          ref={(value: unknown) => {
+            treeRef.current = value as TreeApiLike<TreeNode> | null
+          }}
           rowHeight={ROW_HEIGHT}
           width={size.width}
         >
