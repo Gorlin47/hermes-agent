@@ -535,6 +535,29 @@ export interface ProfilesResponse {
   profiles: ProfileInfo[]
 }
 
+export interface DesktopBrandingIntroCopy {
+  body: string
+  headline: string
+}
+
+export interface DesktopBrandingTheme {
+  accent: string
+  accent_soft: string
+  text: string
+}
+
+export interface DesktopBrandingResponse {
+  avatar_letter: string
+  intro_copy: DesktopBrandingIntroCopy[]
+  profile: string
+  source: 'default' | 'fallback' | 'global' | 'profile'
+  status_label: string
+  tagline: string
+  theme: DesktopBrandingTheme
+  version: number
+  wordmark: string
+}
+
 export interface SkillInfo {
   category: string
   description: string

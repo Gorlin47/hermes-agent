@@ -17,7 +17,8 @@
     "jsx": "react-jsx",
     "paths": {
       "@/*": ["./src/*"],
-      "@hermes/shared": ["../shared/src/index.ts"]
+      "@hermes/shared": ["../shared/src/index.ts"],
+      "@tanstack/react-query": ["../../node_modules/@tanstack/react-query/build/modern/index.d.cts"]
     }
   },
   "include": ["src", "../shared/src"],

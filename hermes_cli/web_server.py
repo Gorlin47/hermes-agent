@@ -1923,6 +1923,17 @@ async def get_status(profile: Optional[str] = None):
             status_scope.__exit__(*sys.exc_info())
 
 
+@app.get("/api/desktop/branding")
+async def get_desktop_branding(profile: Optional[str] = None):
+    requested_profile = (profile or "").strip()
+    if requested_profile and requested_profile.lower() != "current":
+        _resolve_profile_dir(requested_profile)
+
+    from hermes_cli.desktop_branding import load_desktop_branding
+
+    return load_desktop_branding(profile)
+
+
 _WINDOWS_11_MIN_BUILD = 22000
 
 

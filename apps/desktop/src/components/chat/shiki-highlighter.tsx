@@ -49,6 +49,20 @@ const MAX_HIGHLIGHT_LINES = 3_000
 const CHUNK_LINES = 200
 const EST_LINE_PX = 16
 
+type LooseShikiProps = {
+  addDefaultStyles?: boolean
+  as?: 'div' | 'pre'
+  children: string
+  colorReplacements?: Record<string, Record<string, string>>
+  defaultColor?: string
+  delay?: number
+  language: string
+  showLanguage?: boolean
+  theme: typeof SHIKI_THEME
+}
+
+const LooseShikiHighlighter = ShikiHighlighter as unknown as FC<LooseShikiProps>
+
 export function exceedsHighlightBudget(code: string): boolean {
   if (code.length > MAX_HIGHLIGHT_CHARS) {
     return true
@@ -158,7 +172,7 @@ export const SyntaxHighlighter: FC<HermesSyntaxHighlighterProps> = ({
             {plain ? (
               <PlainCode code={trimmed} />
             ) : (
-              <ShikiHighlighter
+              <LooseShikiHighlighter
                 addDefaultStyles={false}
                 as="div"
                 colorReplacements={SHIKI_COLOR_REPLACEMENTS}
@@ -169,7 +183,7 @@ export const SyntaxHighlighter: FC<HermesSyntaxHighlighterProps> = ({
                 theme={SHIKI_THEME}
               >
                 {trimmed}
-              </ShikiHighlighter>
+              </LooseShikiHighlighter>
             )}
           </Pre>
         </ExpandableBlock>

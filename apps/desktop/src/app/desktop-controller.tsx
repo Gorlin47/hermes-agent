@@ -23,6 +23,7 @@ import {
 } from '../lib/session-source'
 import { latestSessionTodos } from '../lib/todos'
 import { setCronFocusJobId, setCronJobs } from '../store/cron'
+import { refreshDesktopBranding } from '../store/desktop-branding'
 import {
   $panesFlipped,
   $pinnedSessionIds,
@@ -55,8 +56,8 @@ import {
   $gatewayState,
   $messages,
   $messagingSessions,
-  $resumeFailedSessionId,
   $resumeExhaustedSessionId,
+  $resumeFailedSessionId,
   $selectedStoredSessionId,
   $sessions,
   $workingSessionIds,
@@ -725,6 +726,7 @@ export function DesktopController() {
     // already shows the previous profile's model.
     void refreshCurrentModel(true)
     void refreshActiveProfile()
+    void refreshDesktopBranding(activeGatewayProfile)
   }, [activeGatewayProfile, refreshCurrentModel])
 
   const composer = useComposerActions({
@@ -855,9 +857,10 @@ export function DesktopController() {
     if (gatewayState === 'open') {
       void refreshCurrentModel()
       void refreshActiveProfile()
+      void refreshDesktopBranding(activeGatewayProfile)
       void refreshSessions().catch(() => undefined)
     }
-  }, [gatewayState, refreshCurrentModel, refreshSessions])
+  }, [activeGatewayProfile, gatewayState, refreshCurrentModel, refreshSessions])
 
   // Keep the cron jobs section live without a user action: the scheduler ticks
   // in the background (advancing next-run/state and creating runs), so poll the

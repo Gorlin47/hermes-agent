@@ -1,0 +1,74 @@
+name: Build Desktop Windows Artifact
+
+on:
+  push:
+    branches:
+      - 'jony/desktop-branding-win-build'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-windows-artifact-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Hermes Desktop Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Typecheck desktop workspace
+        run: npm run --prefix apps/desktop typecheck -- --pretty false
+
+      - name: Build NSIS installer
+        run: npm run --prefix apps/desktop dist:win:nsis
+
+      - name: Locate installer
+        id: locate
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "apps/desktop/release" -Filter "*.exe" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw "No se encontró instalador .exe en apps/desktop/release"
+          }
+          "installer_path=$($installer.FullName)" >> $env:GITHUB_OUTPUT
+          "installer_name=$($installer.Name)" >> $env:GITHUB_OUTPUT
+          "short_sha=$($env:GITHUB_SHA.Substring(0,7))" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-desktop-windows-installer-${{ steps.locate.outputs.short_sha }}
+          path: ${{ steps.locate.outputs.installer_path }}
+          if-no-files-found: error
+
+      - name: Publish prerelease asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: desktop-branding-win-build-${{ github.run_number }}-${{ steps.locate.outputs.short_sha }}
+          name: Desktop branding Windows build ${{ steps.locate.outputs.short_sha }}
+          prerelease: true
+          generate_release_notes: false
+          body: |
+            Temporary Windows installer build for Desktop branding validation.
+
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+          files: ${{ steps.locate.outputs.installer_path }}

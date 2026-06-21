@@ -12,6 +12,7 @@ import type {
   CronJob,
   CronJobCreatePayload,
   CronJobUpdates,
+  DesktopBrandingResponse,
   ElevenLabsVoicesResponse,
   EnvVarInfo,
   HermesConfig,
@@ -65,6 +66,9 @@ export type {
   CronJobCreatePayload,
   CronJobSchedule,
   CronJobUpdates,
+  DesktopBrandingIntroCopy,
+  DesktopBrandingResponse,
+  DesktopBrandingTheme,
   ElevenLabsVoice,
   ElevenLabsVoicesResponse,
   EnvVarInfo,
@@ -269,6 +273,13 @@ export function getGlobalModelInfo(): Promise<ModelInfoResponse> {
 export function getStatus(): Promise<StatusResponse> {
   return window.hermesDesktop.api<StatusResponse>({
     path: '/api/status'
+  })
+}
+
+export function getDesktopBranding(): Promise<DesktopBrandingResponse> {
+  return window.hermesDesktop.api<DesktopBrandingResponse>({
+    ...profileScoped(),
+    path: '/api/desktop/branding'
   })
 }
 

@@ -1,4 +1,7 @@
+import { useStore } from '@nanostores/react'
 import { type CSSProperties, useState } from 'react'
+
+import { $desktopBranding } from '@/store/desktop-branding'
 
 import introCopyJsonl from './intro-copy.jsonl?raw'
 
@@ -28,7 +31,7 @@ const FALLBACK_COPY: IntroCopy[] = [
     body: "Bring the code, question, or stuck part. I'll read the room before making changes."
   },
   {
-    headline: 'What should Hermes look at?',
+    headline: 'What should J.A.R.V.I.S. look at?',
     body: "Send the task, failing path, or half-formed plan. I'll help turn it into action."
   },
   {
@@ -120,7 +123,7 @@ function fallbackCopyForPersonality(personalityKey: string): IntroCopy[] {
       body: "Send the task, file, or rough idea. I'll use your configured voice and keep the work grounded in this repo."
     },
     {
-      headline: `What does ${label} Hermes need to see?`,
+      headline: `What does ${label} J.A.R.V.I.S. need to see?`,
       body: "Bring the context or the stuck part. I'll adapt to your configured personality."
     },
     {
@@ -128,7 +131,7 @@ function fallbackCopyForPersonality(personalityKey: string): IntroCopy[] {
       body: "Send the problem, file, or idea. I'll follow the personality you've configured."
     },
     {
-      headline: `What should ${label} Hermes tackle?`,
+      headline: `What should ${label} J.A.R.V.I.S. tackle?`,
       body: "Drop the task here. I'll keep the work grounded in the repo."
     },
     {
@@ -142,9 +145,7 @@ function pickCopy(copies: IntroCopy[], seed = 0): IntroCopy {
   return copies[Math.abs(seed) % copies.length] || FALLBACK_COPY[0]
 }
 
-const WORDMARK = 'HERMES AGENT'
-
-function resolveCopy(personality?: string, seed?: number): IntroCopy {
+function resolveLocalCopy(personality?: string, seed?: number): IntroCopy {
   const personalityKey = normalizeKey(personality)
 
   const copies = NEUTRAL_PERSONALITIES.has(personalityKey)
@@ -155,8 +156,22 @@ function resolveCopy(personality?: string, seed?: number): IntroCopy {
 }
 
 export function Intro({ personality, seed }: IntroProps) {
+  const branding = useStore($desktopBranding)
   const [mountSeed] = useState(() => Math.floor(Math.random() * 100000))
-  const copy = resolveCopy(personality, mountSeed + (seed ?? 0))
+  const effectiveSeed = mountSeed + (seed ?? 0)
+
+  const copy = branding.source === 'fallback'
+    ? resolveLocalCopy(personality, effectiveSeed)
+    : pickCopy(branding.intro_copy, effectiveSeed)
+
+  const accent = branding.theme.accent
+  const accentSoft = branding.theme.accent_soft
+  const textColor = branding.theme.text
+
+  const wordmarkStyle = {
+    '--fit-min': '2.75rem',
+    color: textColor
+  } as CSSProperties
 
   return (
     <div
@@ -164,18 +179,56 @@ export function Intro({ personality, seed }: IntroProps) {
       data-slot="aui_intro"
     >
       <div className="w-full min-w-0">
-        <p
-          aria-label={WORDMARK}
-          className="fit-text mx-auto mb-1 w-[calc(100%-1rem)] font-['Collapse'] font-bold uppercase leading-[0.9] tracking-[0.08em] text-midground mix-blend-plus-lighter dark:text-foreground/90"
-          style={{ '--fit-min': '2.75rem' } as CSSProperties}
-        >
-          <span>
-            <span>{WORDMARK}</span>
-          </span>
-          <span aria-hidden="true">{WORDMARK}</span>
-        </p>
+        <div className="mx-auto max-w-3xl rounded-[1.6rem] border border-border/50 bg-background/20 px-6 py-8 shadow-[0_24px_60px_rgba(0,0,0,0.22)] backdrop-blur-sm sm:px-8">
+          <div
+            className="mx-auto mb-5 grid h-24 w-24 place-items-center rounded-full border bg-gradient-to-b from-white/5 to-transparent"
+            style={{ borderColor: accentSoft, boxShadow: `inset 0 0 28px ${accentSoft}` }}
+          >
+            <div
+              className="grid h-14 w-14 place-items-center rounded-full text-lg font-extrabold tracking-[0.12em] shadow-[0_0_32px_rgba(34,211,238,0.25)]"
+              style={{
+                backgroundImage: `radial-gradient(circle, ${textColor} 0%, ${accentSoft} 38%, rgba(0,0,0,0) 72%)`,
+                boxShadow: `0 0 32px ${accentSoft}`,
+                color: textColor
+              }}
+            >
+              {branding.avatar_letter}
+            </div>
+          </div>
 
-        <p className="m-0 text-center leading-normal tracking-tight">{copy.body}</p>
+          <div
+            className="mb-4 inline-flex items-center gap-2 rounded-full border bg-background/45 px-4 py-2 text-[0.65rem] font-semibold uppercase tracking-[0.24em]"
+            style={{ borderColor: accentSoft, color: textColor }}
+          >
+            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: accent, boxShadow: `0 0 14px ${accent}` }} />
+            <span>{branding.status_label}</span>
+          </div>
+
+          <p
+            aria-label={branding.wordmark}
+            className="fit-text mx-auto mb-2 w-[calc(100%-1rem)] font-['Collapse'] font-bold uppercase leading-[0.9] tracking-[0.08em] mix-blend-plus-lighter"
+            style={wordmarkStyle}
+          >
+            <span>
+              <span>{branding.wordmark}</span>
+            </span>
+            <span aria-hidden="true">{branding.wordmark}</span>
+          </p>
+
+          <p className="mb-4 text-center text-[0.72rem] uppercase tracking-[0.28em] text-muted-foreground/80">
+            {branding.tagline}
+          </p>
+
+          <div
+            className="mx-auto mb-5 h-px w-28"
+            style={{ backgroundImage: `linear-gradient(to right, transparent, ${accent}, transparent)` }}
+          />
+
+          <p className="mb-2 text-center text-base font-medium tracking-tight text-foreground/90">{copy.headline}</p>
+          <p className="m-0 mx-auto max-w-[32rem] text-center leading-relaxed tracking-tight text-muted-foreground">
+            {copy.body}
+          </p>
+        </div>
       </div>
     </div>
   )

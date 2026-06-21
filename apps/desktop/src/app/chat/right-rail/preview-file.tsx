@@ -24,6 +24,19 @@ import { $currentCwd } from '@/store/session'
 const SHIKI_THEME = { dark: 'github-dark-default', light: 'github-light-default' } as const
 const TEXT_PREVIEW_MAX_BYTES = 512 * 1024
 
+type LooseShikiProps = {
+  addDefaultStyles?: boolean
+  as?: 'div' | 'pre'
+  children: string
+  defaultColor?: string
+  delay?: number
+  language: string
+  showLanguage?: boolean
+  theme: typeof SHIKI_THEME
+}
+
+const LooseShikiHighlighter = ShikiHighlighter as unknown as React.ComponentType<LooseShikiProps>
+
 type EmptyStateTone = 'neutral' | 'warning'
 
 const TONE_STYLES: Record<EmptyStateTone, { cube: string; primary: string }> = {
@@ -261,7 +274,7 @@ function MarkdownCode({ className, children, ...props }: ComponentProps<'code'>)
   }
 
   return (
-    <ShikiHighlighter
+    <LooseShikiHighlighter
       addDefaultStyles={false}
       as="div"
       defaultColor="light-dark()"
@@ -271,7 +284,7 @@ function MarkdownCode({ className, children, ...props }: ComponentProps<'code'>)
       theme={SHIKI_THEME}
     >
       {String(children).replace(/\n$/, '')}
-    </ShikiHighlighter>
+    </LooseShikiHighlighter>
   )
 }
 
@@ -433,7 +446,7 @@ function SourceView({ filePath, language, text }: { filePath: string; language: 
             }}
           />
         )}
-        <ShikiHighlighter
+        <LooseShikiHighlighter
           addDefaultStyles={false}
           as="div"
           defaultColor="light-dark()"
@@ -443,7 +456,7 @@ function SourceView({ filePath, language, text }: { filePath: string; language: 
           theme={SHIKI_THEME}
         >
           {text}
-        </ShikiHighlighter>
+        </LooseShikiHighlighter>
       </div>
     </div>
   )

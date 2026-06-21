@@ -1,5 +1,5 @@
-import { useCallback, useRef, useState } from 'react'
-import { type NodeApi, type NodeRendererProps, Tree, type TreeApi } from 'react-arborist'
+import { type CSSProperties, useCallback, useRef, useState } from 'react'
+import { type NodeApi, Tree } from 'react-arborist'
 
 import { PageLoader } from '@/components/page-loader'
 import { Codicon } from '@/components/ui/codicon'
@@ -27,6 +27,16 @@ interface ProjectTreeProps {
   openState: Record<string, boolean>
 }
 
+interface TreeApiLike<T> {
+  get(id: string): NodeApi<T> | null
+}
+
+interface ProjectTreeRowRendererProps<T> {
+  dragHandle?: ((element: HTMLDivElement | null) => void) | null
+  node: NodeApi<T>
+  style: CSSProperties
+}
+
 export function ProjectTree({
   collapseNonce,
   cwd,
@@ -39,7 +49,7 @@ export function ProjectTree({
   openState
 }: ProjectTreeProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const treeRef = useRef<TreeApi<TreeNode> | null>(null)
+  const treeRef = useRef<TreeApiLike<TreeNode> | null>(null)
   const [size, setSize] = useState({ height: 0, width: 0 })
 
   const syncTreeSize = useCallback(() => {
@@ -92,7 +102,7 @@ export function ProjectTree({
     <div className="min-h-0 flex-1 overflow-hidden" ref={containerRef}>
       {size.height > 0 && size.width > 0 ? (
         <Tree<TreeNode>
-          childrenAccessor={node => (node?.isDirectory ? (node.children ?? []) : null)}
+          childrenAccessor={(node: TreeNode) => (node.isDirectory ? (node.children ?? []) : null)}
           data={data}
           disableDrag
           disableDrop
@@ -110,7 +120,7 @@ export function ProjectTree({
           rowHeight={ROW_HEIGHT}
           width={size.width}
         >
-          {props => (
+          {(props: ProjectTreeRowRendererProps<TreeNode>) => (
             <ProjectTreeRow
               {...props}
               onAttachFile={onActivateFile}
@@ -139,7 +149,7 @@ function ProjectTreeRow({
   onAttachFolder,
   onPreviewFile,
   style
-}: NodeRendererProps<TreeNode> & {
+}: ProjectTreeRowRendererProps<TreeNode> & {
   onAttachFile: (path: string) => void
   onAttachFolder: (path: string) => void
   onPreviewFile?: (path: string) => void

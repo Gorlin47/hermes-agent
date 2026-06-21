@@ -212,6 +212,38 @@ class TestProfileScopedMcp:
         assert "srv2" not in _cfg(isolated_profiles["worker_beta"]).get("mcp_servers", {})
 
 
+class TestProfileScopedDesktopBranding:
+    def test_branding_get_reads_target_profile(self, client, isolated_profiles):
+        (isolated_profiles["worker_beta"] / "desktop-branding.yaml").write_text(
+            "wordmark: WORKER\ntagline: Worker profile\n",
+            encoding="utf-8",
+        )
+        resp = client.get("/api/desktop/branding", params={"profile": "worker_beta"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["wordmark"] == "WORKER"
+        assert body["tagline"] == "Worker profile"
+        assert body["source"] == "profile"
+        assert body["profile"] == "worker_beta"
+
+    def test_branding_get_uses_global_fallback_for_named_profile(self, client, isolated_profiles):
+        (isolated_profiles["default"] / "desktop-branding.yaml").write_text(
+            "wordmark: GLOBAL\ntagline: Shared\n",
+            encoding="utf-8",
+        )
+        resp = client.get("/api/desktop/branding", params={"profile": "worker_beta"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["wordmark"] == "GLOBAL"
+        assert body["tagline"] == "Shared"
+        assert body["source"] == "global"
+        assert body["profile"] == "worker_beta"
+
+    def test_branding_unknown_profile_404(self, client, isolated_profiles):
+        resp = client.get("/api/desktop/branding", params={"profile": "ghost"})
+        assert resp.status_code == 404
+
+
 class TestProfileScopedModel:
     def test_model_set_main_scoped(self, client, isolated_profiles):
         resp = client.post(
