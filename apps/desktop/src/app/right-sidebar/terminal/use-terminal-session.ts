@@ -2,7 +2,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type ITheme } from '@xterm/xterm'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 
@@ -138,10 +138,10 @@ interface UseTerminalSessionOptions {
 
 // Bind the palette to the live skin surface so the terminal blends with the app
 // (and the contrast clamp has a real background to work against).
-function withSurface(theme: ReturnType<typeof terminalTheme>) {
+function withSurface(theme: ReturnType<typeof terminalTheme>): ITheme {
   const surface = resolveSurfaceColor(theme.background ?? '#ffffff')
 
-  return { ...theme, background: surface, cursorAccent: surface }
+  return { ...theme, background: surface, cursorAccent: surface } as ITheme
 }
 
 function transferHasDropCandidates(t: DataTransfer): boolean {
